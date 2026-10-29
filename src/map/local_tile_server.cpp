@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QTextStream>
 #include <QImage>
 #include <QBuffer>
 #include <QRegularExpression>
@@ -84,10 +85,10 @@ void LocalTileServer::handleRequest(QTcpSocket *socket, const QString &requestLi
         }
     }
 
-    // 2. 超近距离无级放大 (Zoom >= 19, 20, 21, 22...):
-    // 逐级向上溯源搜索真实祖先瓦片 (从 iz-1 溯源至 18 或更低)，裁切对应区域并以高品质双三次平滑放大至 256x256
-    if (iz >= 19) {
-        for (int pz = iz - 1; pz >= 17; --pz) {
+    // 2. 超近距离无级放大 (Zoom >= 18, 19, 20, 21, 22...):
+    // 逐级向上溯源搜索真实祖先瓦片 (从 iz-1 溯源至 14)，裁切对应区域并以高品质双三次平滑放大至 256x256
+    if (iz >= 18) {
+        for (int pz = iz - 1; pz >= 14; --pz) {
             int shift = iz - pz;
             int px = ix >> shift;
             int py = iy >> shift;

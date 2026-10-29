@@ -8,11 +8,11 @@ Item {
     visible: true
     clip: true  // 确保放大后不溢出地图窗口
 
-    // 虚拟缩放级别：16.0 ~ 22.0
-    // 16.0 ~ 19.0: 物理高清晰度卫星切片
+    // 缩放级别：15.0 ~ 22.0
+    // 15.0 ~ 19.0: 物理高清晰度卫星切片
     // 19.0 ~ 22.0: 硬件级无级平滑放大图片 (保证绝不黑屏、绝不出现“无卫星图”提示，图片可深度放大)
-    property real currentZoom: 19.0
-    readonly property real minZoom: 16.0
+    property real currentZoom: 18.5
+    readonly property real minZoom: 15.0
     readonly property real maxZoom: 22.0
 
     // 晏湖中心精准坐标 (吉林大学前卫南区晏湖水心及湖心岛精确像素锚定)
@@ -31,7 +31,7 @@ Item {
     }
 
     Component.onCompleted: {
-        root.applyZoom(19.0);
+        root.applyZoom(18.5);
     }
 
     Plugin {
@@ -51,6 +51,11 @@ Item {
             name: "osm.mapping.providersrepository.disabled"
             value: true
         }
+        // 彻底禁用 QtLocation 磁盘缓存，防止缓存历史错误切片或“无卫星图”占位图
+        PluginParameter {
+            name: "osm.mapping.cache.disk.size"
+            value: 0
+        }
     }
 
     Map {
@@ -61,8 +66,8 @@ Item {
 
         // 默认视野绝对居中于晏湖水心
         center: root.yanhuCenter
-        zoomLevel: 19.0
-        minimumZoomLevel: 16.0
+        zoomLevel: 18.5
+        minimumZoomLevel: 15.0
         maximumZoomLevel: 19.0
 
         onSupportedMapTypesChanged: {
@@ -172,7 +177,7 @@ Item {
                     var totalDist = Math.abs(mouse.x - pressX) + Math.abs(mouse.y - pressY);
                     if (totalDist > 5) {
                         isDragging = true;
-                        map.pan(-dx / map.scale, -dy / map.scale);
+                        map.pan(-dx, -dy);
                     }
                     lastX = mouse.x;
                     lastY = mouse.y;
@@ -250,33 +255,65 @@ Item {
         }
     }
 
-    // 快捷居中按钮：重置湖心
-    Rectangle {
+    // 悬浮居中控制按钮组：独立“居中晏湖”与“定位船只”
+    Column {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: 20
-        width: 110
-        height: 38
-        radius: 8
-        color: "#1976D2"
-        opacity: 0.95
+        spacing: 10
 
-        Text {
-            anchors.centerIn: parent
-            text: (mapBridge.boatLat !== 0.0 && mapBridge.boatLon !== 0.0) ? "锁定船只" : "居中晏湖"
-            color: "white"
-            font.bold: true
-            font.pixelSize: 13
+        // 1. 永久“居中晏湖”按钮（任何时候点击均绝对重置视野至晏湖湖心）
+        Rectangle {
+            width: 110
+            height: 38
+            radius: 8
+            color: "#1976D2"
+            border.color: "#FFFFFF"
+            border.width: 1.5
+            opacity: 0.95
+
+            Text {
+                anchors.centerIn: parent
+                text: "居中晏湖"
+                color: "white"
+                font.bold: true
+                font.pixelSize: 13
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: {
+                    map.center = root.yanhuCenter;
+                    root.applyZoom(18.5);
+                }
+            }
         }
 
-        MouseArea {
-            anchors.fill: parent
-            onClicked: {
-                if (mapBridge.boatLat !== 0.0 && mapBridge.boatLon !== 0.0) {
-                    map.center = QtPositioning.coordinate(mapBridge.boatLat, mapBridge.boatLon);
-                } else {
-                    map.center = root.yanhuCenter;
-                    root.applyZoom(19.0);
+        // 2. “定位船只”按钮（仅当接收到有效经纬度且不在 0,0 时显示）
+        Rectangle {
+            width: 110
+            height: 38
+            radius: 8
+            color: "#388E3C"
+            border.color: "#FFFFFF"
+            border.width: 1.5
+            opacity: 0.95
+            visible: mapBridge.boatLat !== 0.0 || mapBridge.boatLon !== 0.0
+
+            Text {
+                anchors.centerIn: parent
+                text: "定位船只"
+                color: "white"
+                font.bold: true
+                font.pixelSize: 13
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: {
+                    if (mapBridge.boatLat !== 0.0 && mapBridge.boatLon !== 0.0) {
+                        map.center = QtPositioning.coordinate(mapBridge.boatLat, mapBridge.boatLon);
+                    }
                 }
             }
         }
