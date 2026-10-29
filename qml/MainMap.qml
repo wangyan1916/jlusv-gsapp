@@ -41,16 +41,15 @@ Item {
         minimumZoomLevel: 14
         maximumZoomLevel: 18
 
-        activeMapType: supportedMapTypes.length > 0 ? supportedMapTypes[supportedMapTypes.length - 1] : null
-
-        Component.onCompleted: {
+        // 当支持的地图类型加载完毕后，安全切换至自定义/本地离线图层
+        onSupportedMapTypesChanged: {
             for (var i = 0; i < supportedMapTypes.length; ++i) {
-                if (supportedMapTypes[i].name.toLowerCase().indexOf("custom") !== -1) {
+                if (supportedMapTypes[i].style === MapType.CustomMap) {
                     activeMapType = supportedMapTypes[i];
-                    break;
+                    return;
                 }
             }
-            if (!activeMapType && supportedMapTypes.length > 0) {
+            if (supportedMapTypes.length > 0) {
                 activeMapType = supportedMapTypes[supportedMapTypes.length - 1];
             }
         }
