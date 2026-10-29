@@ -1,0 +1,72 @@
+# ==========================================
+# 地图与大体积资产过滤 (Map & Large Assets)
+# ==========================================
+maps/
+tiles/
+tile_cache/
+cache/
+*.mbtiles
+*.tif
+*.tiff
+*.geotiff
+*.img
+*.pbf
+*.tar
+*.zip
+*.7z
+*.rar
+
+# ==========================================
+# 构建输出与中间文件 (Build & Intermediate)
+# ==========================================
+build/
+build-*/
+bin/
+lib/
+out/
+*.obj
+*.o
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.exp
+*.pdb
+*.ilk
+*.idb
+
+# CMake 生成文件
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.ninja
+.ninja_*
+
+# Qt 自动生成文件
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.qmlc
+*.jsc
+
+# ==========================================
+# IDE 与编辑器配置
+# ==========================================
+.vs/
+*.user
+*.user.*
+.idea/
+.vscode/
+*.suo
+*.VC.db
+*.opensdf
+*.sdf
+
+# 系统临时文件
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
