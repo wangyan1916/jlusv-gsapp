@@ -21,6 +21,17 @@ AppWindow::AppWindow(QWidget *parent)
     connect(m_client, &GsClient::connectionStatusChanged, this, &AppWindow::onConnectionStatusChanged);
     connect(m_client, &GsClient::telemetryUpdated, this, &AppWindow::onTelemetryUpdated);
     connect(m_client, &GsClient::missionResult, this, &AppWindow::onMissionResult);
+    connect(m_client, &GsClient::authStatusChanged, this, [this](bool ok, const QString &msg) {
+        if (ok) {
+            m_statusLabel->setText("状态: 已连接 (安全认证成功)");
+            m_statusLabel->setStyleSheet("color: green; font-weight: bold;");
+            logMessage("地面站安全认证通过 (已获取写入控制会话)");
+        } else {
+            m_statusLabel->setText("状态: 已连接 (认证失败)");
+            m_statusLabel->setStyleSheet("color: #E65100; font-weight: bold;");
+            logMessage("地面站安全认证未通过: " + msg);
+        }
+    });
 
     connect(m_client, &GsClient::telemetryUpdated, m_bridge, &MapBridge::updateTelemetry);
     connect(m_bridge, &MapBridge::waypointsChanged, this, [this]() {
@@ -56,13 +67,17 @@ void AppWindow::setupUi() {
     auto *connGroup = new QGroupBox("地面站网关连接", panelWidget);
     auto *connLayout = new QGridLayout(connGroup);
     m_ipEdit = new QLineEdit("http://192.168.188.2", connGroup);
+    m_pwdEdit = new QLineEdit("jlusv", connGroup);
+    m_pwdEdit->setEchoMode(QLineEdit::Password);
     m_connectBtn = new QPushButton("连接", connGroup);
     m_statusLabel = new QLabel("状态: 未连接", connGroup);
     m_statusLabel->setStyleSheet("color: red; font-weight: bold;");
     connLayout->addWidget(new QLabel("网关地址:"), 0, 0);
-    connLayout->addWidget(m_ipEdit, 0, 1);
-    connLayout->addWidget(m_connectBtn, 0, 2);
-    connLayout->addWidget(m_statusLabel, 1, 0, 1, 3);
+    connLayout->addWidget(m_ipEdit, 0, 1, 1, 2);
+    connLayout->addWidget(new QLabel("控制密码:"), 1, 0);
+    connLayout->addWidget(m_pwdEdit, 1, 1);
+    connLayout->addWidget(m_connectBtn, 1, 2);
+    connLayout->addWidget(m_statusLabel, 2, 0, 1, 3);
     panelLayout->addWidget(connGroup);
 
     connect(m_connectBtn, &QPushButton::clicked, this, &AppWindow::onConnectClicked);
@@ -151,14 +166,22 @@ void AppWindow::logMessage(const QString &msg) {
 
 void AppWindow::onConnectClicked() {
     m_client->setBaseUrl(m_ipEdit->text());
+    m_client->setPassword(m_pwdEdit->text());
     m_client->startPolling(500);
     logMessage("开始轮询地面站网关: " + m_client->baseUrl());
+    logMessage("正在向网关请求安全认证 (POST /api/v1/auth/login)...");
+    m_client->login();
 }
 
 void AppWindow::onConnectionStatusChanged(bool connected) {
     if (connected) {
-        m_statusLabel->setText("状态: 已连接地面站");
-        m_statusLabel->setStyleSheet("color: green; font-weight: bold;");
+        if (m_client->isAuthenticated()) {
+            m_statusLabel->setText("状态: 已连接 (安全认证成功)");
+            m_statusLabel->setStyleSheet("color: green; font-weight: bold;");
+        } else {
+            m_statusLabel->setText("状态: 已连接地面站");
+            m_statusLabel->setStyleSheet("color: #1565C0; font-weight: bold;");
+        }
         logMessage("地面站 HTTP 通信正常。");
     } else {
         m_statusLabel->setText("状态: 通信中断");

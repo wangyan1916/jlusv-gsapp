@@ -43,6 +43,7 @@ private:
 
     // UI 组件
     QLineEdit *m_ipEdit;
+    QLineEdit *m_pwdEdit;
     QPushButton *m_connectBtn;
     QLabel *m_statusLabel;
 

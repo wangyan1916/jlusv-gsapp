@@ -3,9 +3,11 @@
 #include <QObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QNetworkCookieJar>
 #include <QTimer>
 #include <QVector>
 #include <QString>
+#include <functional>
 
 namespace jlusv {
 
@@ -41,8 +43,15 @@ public:
     void setBaseUrl(const QString &url);
     QString baseUrl() const { return m_baseUrl; }
 
+    void setPassword(const QString &pwd);
+    QString password() const { return m_password; }
+    bool isAuthenticated() const { return m_authenticated; }
+
     void startPolling(int intervalMs = 500);
     void stopPolling();
+
+    // 网关安全认证
+    void login(std::function<void(bool ok, const QString &err)> callback = nullptr);
 
     // 任务发布指令
     void submitWaypoints(const QVector<Waypoint> &waypoints, int ttlSeconds = 300);
@@ -52,20 +61,26 @@ signals:
     void telemetryUpdated(const UsvTelemetry &telemetry);
     void missionResult(bool success, const QString &message);
     void connectionStatusChanged(bool connected);
+    void authStatusChanged(bool authenticated, const QString &message);
 
 private slots:
     void onPollTimer();
     void onOverviewReply(QNetworkReply *reply);
-    void onSubmitReply(QNetworkReply *reply);
 
 private:
+    void doSubmitWaypoints(const QVector<Waypoint> &waypoints, int ttlSeconds, bool isRetry);
+    void doSubmitEmergencyStop(bool isRetry);
+    QString generateOperationId();
+
     QString m_baseUrl{"http://192.168.188.2"};
+    QString m_password{"jlusv"};
+    QString m_sessionCookie;
+    bool m_authenticated = false;
+
     QNetworkAccessManager *m_nam;
     QTimer *m_pollTimer;
     UsvTelemetry m_latestTelemetry;
     bool m_connected = false;
-
-    QString generateOperationId();
 };
 
 } // namespace jlusv

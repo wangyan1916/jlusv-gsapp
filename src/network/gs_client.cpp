@@ -13,14 +13,69 @@ GsClient::GsClient(QObject *parent)
     , m_nam(new QNetworkAccessManager(this))
     , m_pollTimer(new QTimer(this))
 {
+    m_nam->setCookieJar(new QNetworkCookieJar(this));
     connect(m_pollTimer, &QTimer::timeout, this, &GsClient::onPollTimer);
 }
 
 void GsClient::setBaseUrl(const QString &url) {
     m_baseUrl = url.trimmed();
-    if (m_baseUrl.endsWith('/')) {
+    while (m_baseUrl.endsWith('/')) {
         m_baseUrl.chop(1);
     }
+    if (!m_baseUrl.isEmpty() && !m_baseUrl.startsWith("http://") && !m_baseUrl.startsWith("https://")) {
+        m_baseUrl = "http://" + m_baseUrl;
+    }
+}
+
+void GsClient::setPassword(const QString &pwd) {
+    m_password = pwd.trimmed();
+}
+
+void GsClient::login(std::function<void(bool ok, const QString &err)> callback) {
+    if (m_baseUrl.isEmpty()) {
+        if (callback) callback(false, "未配置网关地址");
+        return;
+    }
+
+    QUrl url(m_baseUrl + "/api/v1/auth/login");
+    QNetworkRequest request(url);
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    request.setRawHeader("Origin", m_baseUrl.toUtf8());
+    request.setRawHeader("X-GS-Write", "1");
+
+    QJsonObject reqObj;
+    reqObj.insert("password", m_password);
+
+    QNetworkReply *reply = m_nam->post(request, QJsonDocument(reqObj).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, callback]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = reply->readAll();
+
+        if (code == 200) {
+            m_authenticated = true;
+            // 提取 session Cookie 备用
+            for (const auto &hdr : reply->rawHeaderPairs()) {
+                if (hdr.first.toLower() == "set-cookie") {
+                    QString s = QString::fromUtf8(hdr.second);
+                    int idx = s.indexOf("session=");
+                    if (idx >= 0) {
+                        int end = s.indexOf(';', idx);
+                        if (end < 0) end = s.length();
+                        m_sessionCookie = s.mid(idx, end - idx).trimmed();
+                    }
+                }
+            }
+            emit authStatusChanged(true, "安全认证成功");
+            if (callback) callback(true, "");
+        } else {
+            m_authenticated = false;
+            m_sessionCookie.clear();
+            QString err = QString("HTTP %1 %2").arg(code).arg(QString::fromUtf8(body));
+            emit authStatusChanged(false, err);
+            if (callback) callback(false, err);
+        }
+    });
 }
 
 void GsClient::startPolling(int intervalMs) {
@@ -112,6 +167,21 @@ void GsClient::submitWaypoints(const QVector<Waypoint> &waypoints, int ttlSecond
         return;
     }
 
+    if (!m_authenticated) {
+        login([this, waypoints, ttlSeconds](bool ok, const QString &err) {
+            if (!ok) {
+                emit missionResult(false, "任务发布被拒绝: 网关安全认证失败 (" + err + ")");
+                return;
+            }
+            doSubmitWaypoints(waypoints, ttlSeconds, false);
+        });
+        return;
+    }
+
+    doSubmitWaypoints(waypoints, ttlSeconds, false);
+}
+
+void GsClient::doSubmitWaypoints(const QVector<Waypoint> &waypoints, int ttlSeconds, bool isRetry) {
     QJsonObject req;
     req.insert("operation_id", generateOperationId());
     req.insert("uid", m_latestTelemetry.uid);
@@ -132,10 +202,34 @@ void GsClient::submitWaypoints(const QVector<Waypoint> &waypoints, int ttlSecond
     QUrl url(m_baseUrl + "/api/v1/missions/submit");
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    request.setRawHeader("Origin", m_baseUrl.toUtf8());
+    request.setRawHeader("X-GS-Write", "1");
+    if (!m_sessionCookie.isEmpty()) {
+        request.setRawHeader("Cookie", m_sessionCookie.toUtf8());
+    }
 
     QNetworkReply *reply = m_nam->post(request, QJsonDocument(req).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        onSubmitReply(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, waypoints, ttlSeconds, isRetry]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = reply->readAll();
+
+        if (code == 200 || code == 202) {
+            emit missionResult(true, "任务发布成功已接收 (202 Accepted)");
+        } else if (code == 401 && !isRetry) {
+            // 会话可能超时失效，尝试重新登录并自动重试一次
+            m_authenticated = false;
+            m_sessionCookie.clear();
+            login([this, waypoints, ttlSeconds](bool ok, const QString &err) {
+                if (ok) {
+                    doSubmitWaypoints(waypoints, ttlSeconds, true);
+                } else {
+                    emit missionResult(false, QString("网关会话失效且重新认证失败: %1").arg(err));
+                }
+            });
+        } else {
+            emit missionResult(false, QString("任务发布被拒绝: HTTP %1 %2").arg(code).arg(QString::fromUtf8(body)));
+        }
     });
 }
 
@@ -145,6 +239,21 @@ void GsClient::submitEmergencyStop() {
         return;
     }
 
+    if (!m_authenticated) {
+        login([this](bool ok, const QString &err) {
+            if (!ok) {
+                emit missionResult(false, "急停发送被拒绝: 网关安全认证失败 (" + err + ")");
+                return;
+            }
+            doSubmitEmergencyStop(false);
+        });
+        return;
+    }
+
+    doSubmitEmergencyStop(false);
+}
+
+void GsClient::doSubmitEmergencyStop(bool isRetry) {
     QJsonObject req;
     req.insert("operation_id", generateOperationId());
     req.insert("uid", m_latestTelemetry.uid);
@@ -154,23 +263,34 @@ void GsClient::submitEmergencyStop() {
     QUrl url(m_baseUrl + "/api/v1/missions/submit");
     QNetworkRequest request(url);
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    request.setRawHeader("Origin", m_baseUrl.toUtf8());
+    request.setRawHeader("X-GS-Write", "1");
+    if (!m_sessionCookie.isEmpty()) {
+        request.setRawHeader("Cookie", m_sessionCookie.toUtf8());
+    }
 
     QNetworkReply *reply = m_nam->post(request, QJsonDocument(req).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        onSubmitReply(reply);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, isRetry]() {
+        reply->deleteLater();
+        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = reply->readAll();
+
+        if (code == 200 || code == 202) {
+            emit missionResult(true, "紧急停船命令已接收 (202 Accepted)");
+        } else if (code == 401 && !isRetry) {
+            m_authenticated = false;
+            m_sessionCookie.clear();
+            login([this](bool ok, const QString &err) {
+                if (ok) {
+                    doSubmitEmergencyStop(true);
+                } else {
+                    emit missionResult(false, QString("网关会话失效且重新认证失败: %1").arg(err));
+                }
+            });
+        } else {
+            emit missionResult(false, QString("紧急停船被拒绝: HTTP %1 %2").arg(code).arg(QString::fromUtf8(body)));
+        }
     });
-}
-
-void GsClient::onSubmitReply(QNetworkReply *reply) {
-    reply->deleteLater();
-    const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    const QByteArray body = reply->readAll();
-
-    if (code == 200 || code == 202) {
-        emit missionResult(true, "任务发布成功已接收 (202 Accepted)");
-    } else {
-        emit missionResult(false, QString("任务发布被拒绝: HTTP %1 %2").arg(code).arg(QString::fromUtf8(body)));
-    }
 }
 
 } // namespace jlusv
