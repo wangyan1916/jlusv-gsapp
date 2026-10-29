@@ -6,6 +6,29 @@ import QtPositioning 5.15
 Item {
     id: root
     visible: true
+    clip: true  // 防止放大后溢出地图窗口
+
+    // 虚拟缩放级别：16.0 ~ 22.0
+    // 16.0 ~ 19.0: 物理高分卫星切片渲染
+    // 19.0 ~ 22.0: GPU 硬件级平滑超分辨率放大 (解决 QtLocation 超过 19 级黑屏问题，图片无级放大)
+    property real currentZoom: 18.2
+    readonly property real minZoom: 16.0
+    readonly property real maxZoom: 22.0
+
+    // 晏湖水心精准中心坐标 (吉林大学前卫南区晏湖)
+    readonly property var yanhuCenter: QtPositioning.coordinate(43.82540, 125.28870)
+
+    function applyZoom(newZoom) {
+        currentZoom = Math.max(minZoom, Math.min(maxZoom, newZoom));
+        if (currentZoom <= 19.0) {
+            map.zoomLevel = currentZoom;
+            map.scale = 1.0;
+        } else {
+            map.zoomLevel = 19.0;
+            // 按照墨卡托 2 的指数级平滑放大图像
+            map.scale = Math.pow(2.0, currentZoom - 19.0);
+        }
+    }
 
     Plugin {
         id: mapPlugin
@@ -30,12 +53,13 @@ Item {
         id: map
         anchors.fill: parent
         plugin: mapPlugin
+        transformOrigin: Item.Center
 
-        // 默认视野：吉林大学中心校区 晏湖 (43.8247°N, 125.2868°E)
-        center: QtPositioning.coordinate(43.8247, 125.2868)
-        zoomLevel: 18.0
-        minimumZoomLevel: 16.0  // 锁定当前晏湖校区范围，防止误缩放到全城
-        maximumZoomLevel: 21.0  // 允许超大幅度放大，精细点选航点
+        // 精准定位于晏湖湖心
+        center: root.yanhuCenter
+        zoomLevel: 18.2
+        minimumZoomLevel: 16.0
+        maximumZoomLevel: 19.0  // 限制在 QtLocation OSM 插件稳定上限，防止黑屏
 
         onSupportedMapTypesChanged: {
             for (var i = 0; i < supportedMapTypes.length; ++i) {
@@ -116,7 +140,7 @@ Item {
             }
         }
 
-        // 鼠标交互：滚轮无级缩放 + 左键点选航点 + 鼠标拖拽平移
+        // 鼠标交互：滚轮无级缩放 + 左键打点 + 拖拽平移
         MouseArea {
             id: mouseArea
             anchors.fill: parent
@@ -144,7 +168,8 @@ Item {
                     var totalDist = Math.abs(mouse.x - pressX) + Math.abs(mouse.y - pressY);
                     if (totalDist > 5) {
                         isDragging = true;
-                        map.pan(-dx, -dy);
+                        // 按比例修正平移量
+                        map.pan(-dx / map.scale, -dy / map.scale);
                     }
                     lastX = mouse.x;
                     lastY = mouse.y;
@@ -161,19 +186,16 @@ Item {
                 isDragging = false;
             }
 
-            // 鼠标滚轮放大/缩小地图
+            // 鼠标滚轮缩放
             onWheel: {
-                if (wheel.angleDelta.y > 0) {
-                    map.zoomLevel = Math.min(map.maximumZoomLevel, map.zoomLevel + 0.5);
-                } else if (wheel.angleDelta.y < 0) {
-                    map.zoomLevel = Math.max(map.minimumZoomLevel, map.zoomLevel - 0.5);
-                }
+                var step = (wheel.angleDelta.y > 0) ? 0.35 : -0.35;
+                root.applyZoom(root.currentZoom + step);
                 wheel.accepted = true;
             }
         }
     }
 
-    // 悬浮缩放控制按钮组 (+ / -)
+    // 悬浮缩放控制按钮组 (+ / −)
     Column {
         anchors.right: parent.right
         anchors.top: parent.top
@@ -181,8 +203,8 @@ Item {
         spacing: 8
 
         Rectangle {
-            width: 40
-            height: 40
+            width: 42
+            height: 42
             radius: 8
             color: "#FFFFFF"
             border.color: "#BDBDBD"
@@ -192,19 +214,19 @@ Item {
             Text {
                 anchors.centerIn: parent
                 text: "+"
-                font.pixelSize: 24
+                font.pixelSize: 26
                 font.bold: true
                 color: "#212121"
             }
             MouseArea {
                 anchors.fill: parent
-                onClicked: map.zoomLevel = Math.min(map.maximumZoomLevel, map.zoomLevel + 0.5)
+                onClicked: root.applyZoom(root.currentZoom + 0.5)
             }
         }
 
         Rectangle {
-            width: 40
-            height: 40
+            width: 42
+            height: 42
             radius: 8
             color: "#FFFFFF"
             border.color: "#BDBDBD"
@@ -214,18 +236,18 @@ Item {
             Text {
                 anchors.centerIn: parent
                 text: "−"
-                font.pixelSize: 24
+                font.pixelSize: 26
                 font.bold: true
                 color: "#212121"
             }
             MouseArea {
                 anchors.fill: parent
-                onClicked: map.zoomLevel = Math.max(map.minimumZoomLevel, map.zoomLevel - 0.5)
+                onClicked: root.applyZoom(root.currentZoom - 0.5)
             }
         }
     }
 
-    // 快捷居中按钮：重置晏湖 / 锁定船只
+    // 快捷居中按钮：重置湖心 / 锁定船只
     Rectangle {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
@@ -250,8 +272,8 @@ Item {
                 if (mapBridge.boatLat !== 0.0 && mapBridge.boatLon !== 0.0) {
                     map.center = QtPositioning.coordinate(mapBridge.boatLat, mapBridge.boatLon);
                 } else {
-                    map.center = QtPositioning.coordinate(43.8247, 125.2868);
-                    map.zoomLevel = 18.5;
+                    map.center = root.yanhuCenter;
+                    root.applyZoom(18.5);
                 }
             }
         }
