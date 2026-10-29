@@ -6,17 +6,17 @@ import QtPositioning 5.15
 Item {
     id: root
     visible: true
-    clip: true  // 防止放大后溢出地图窗口
+    clip: true  // 确保放大后不溢出地图窗口
 
     // 虚拟缩放级别：16.0 ~ 22.0
-    // 16.0 ~ 19.0: 物理高分卫星切片渲染
-    // 19.0 ~ 22.0: GPU 硬件级平滑超分辨率放大 (解决 QtLocation 超过 19 级黑屏问题，图片无级放大)
-    property real currentZoom: 18.2
+    // 16.0 ~ 19.0: 物理高清晰度卫星切片
+    // 19.0 ~ 22.0: 硬件级无级平滑放大图片 (保证绝不黑屏、绝不出现“无卫星图”提示，图片可深度放大)
+    property real currentZoom: 19.0
     readonly property real minZoom: 16.0
     readonly property real maxZoom: 22.0
 
-    // 晏湖水心精准中心坐标 (吉林大学前卫南区晏湖)
-    readonly property var yanhuCenter: QtPositioning.coordinate(43.82540, 125.28870)
+    // 晏湖中心精准坐标 (吉林大学前卫南区晏湖水心 - GCJ-02 卫星图绝对居中)
+    readonly property var yanhuCenter: QtPositioning.coordinate(43.82760, 125.29632)
 
     function applyZoom(newZoom) {
         currentZoom = Math.max(minZoom, Math.min(maxZoom, newZoom));
@@ -25,9 +25,13 @@ Item {
             map.scale = 1.0;
         } else {
             map.zoomLevel = 19.0;
-            // 按照墨卡托 2 的指数级平滑放大图像
+            // 超过 19 级后直接平滑无级放大卫星图片本身，彻底杜绝无图空白，支持放大 1~8 倍
             map.scale = Math.pow(2.0, currentZoom - 19.0);
         }
+    }
+
+    Component.onCompleted: {
+        root.applyZoom(19.0);
     }
 
     Plugin {
@@ -55,11 +59,11 @@ Item {
         plugin: mapPlugin
         transformOrigin: Item.Center
 
-        // 精准定位于晏湖湖心
+        // 默认视野绝对居中于晏湖水心
         center: root.yanhuCenter
-        zoomLevel: 18.2
+        zoomLevel: 19.0
         minimumZoomLevel: 16.0
-        maximumZoomLevel: 19.0  // 限制在 QtLocation OSM 插件稳定上限，防止黑屏
+        maximumZoomLevel: 19.0
 
         onSupportedMapTypesChanged: {
             for (var i = 0; i < supportedMapTypes.length; ++i) {
@@ -140,7 +144,7 @@ Item {
             }
         }
 
-        // 鼠标交互：滚轮无级缩放 + 左键打点 + 拖拽平移
+        // 鼠标交互：滚轮无级缩放 + 左键点选航点 + 拖拽平移
         MouseArea {
             id: mouseArea
             anchors.fill: parent
@@ -168,7 +172,6 @@ Item {
                     var totalDist = Math.abs(mouse.x - pressX) + Math.abs(mouse.y - pressY);
                     if (totalDist > 5) {
                         isDragging = true;
-                        // 按比例修正平移量
                         map.pan(-dx / map.scale, -dy / map.scale);
                     }
                     lastX = mouse.x;
@@ -186,7 +189,7 @@ Item {
                 isDragging = false;
             }
 
-            // 鼠标滚轮缩放
+            // 鼠标滚轮缩放：平滑无级放大缩小
             onWheel: {
                 var step = (wheel.angleDelta.y > 0) ? 0.35 : -0.35;
                 root.applyZoom(root.currentZoom + step);
@@ -203,18 +206,18 @@ Item {
         spacing: 8
 
         Rectangle {
-            width: 42
-            height: 42
+            width: 44
+            height: 44
             radius: 8
             color: "#FFFFFF"
             border.color: "#BDBDBD"
             border.width: 1
-            opacity: 0.92
+            opacity: 0.95
 
             Text {
                 anchors.centerIn: parent
                 text: "+"
-                font.pixelSize: 26
+                font.pixelSize: 28
                 font.bold: true
                 color: "#212121"
             }
@@ -225,18 +228,18 @@ Item {
         }
 
         Rectangle {
-            width: 42
-            height: 42
+            width: 44
+            height: 44
             radius: 8
             color: "#FFFFFF"
             border.color: "#BDBDBD"
             border.width: 1
-            opacity: 0.92
+            opacity: 0.95
 
             Text {
                 anchors.centerIn: parent
                 text: "−"
-                font.pixelSize: 26
+                font.pixelSize: 28
                 font.bold: true
                 color: "#212121"
             }
@@ -247,7 +250,7 @@ Item {
         }
     }
 
-    // 快捷居中按钮：重置湖心 / 锁定船只
+    // 快捷居中按钮：重置湖心
     Rectangle {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
@@ -256,7 +259,7 @@ Item {
         height: 38
         radius: 8
         color: "#1976D2"
-        opacity: 0.92
+        opacity: 0.95
 
         Text {
             anchors.centerIn: parent
@@ -273,7 +276,7 @@ Item {
                     map.center = QtPositioning.coordinate(mapBridge.boatLat, mapBridge.boatLon);
                 } else {
                     map.center = root.yanhuCenter;
-                    root.applyZoom(18.5);
+                    root.applyZoom(19.0);
                 }
             }
         }

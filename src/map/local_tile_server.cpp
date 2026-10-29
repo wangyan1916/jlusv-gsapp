@@ -2,6 +2,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QBuffer>
 #include <QRegularExpression>
@@ -66,14 +67,15 @@ void LocalTileServer::handleRequest(QTcpSocket *socket, const QString &requestLi
         return;
     }
 
-    const QString z = match.captured(1);
-    const QString x = match.captured(2);
-    const QString y = match.captured(3);
+    const int iz = match.captured(1).toInt();
+    const int ix = match.captured(2).toInt();
+    const int iy = match.captured(3).toInt();
 
-    // 1. 优先搜索本地精准切片
+    // 1. 优先搜索本地精准切片 (严格过滤 4235 字节的“此区域无卫星图”占位图)
     for (const QString &baseDir : m_searchDirs) {
-        const QString filePath = QString("%1/%2/%3/%4.png").arg(baseDir, z, x, y);
-        if (QFile::exists(filePath)) {
+        const QString filePath = QString("%1/%2/%3/%4.png").arg(baseDir).arg(iz).arg(ix).arg(iy);
+        QFileInfo fi(filePath);
+        if (fi.exists() && fi.size() != 4235 && fi.size() > 500) {
             QFile file(filePath);
             if (file.open(QIODevice::ReadOnly)) {
                 sendResponse(socket, file.readAll(), "image/png");
@@ -82,29 +84,34 @@ void LocalTileServer::handleRequest(QTcpSocket *socket, const QString &requestLi
         }
     }
 
-    // 2. 超近距离打点支持 (Zoom 20, 21, 22):
-    // 若当前高层级瓦片不存在，从上一级 (z-1) 对应象限切片裁切并放大 (Smooth 256x256)
-    int iz = z.toInt();
-    int ix = x.toInt();
-    int iy = y.toInt();
+    // 2. 超近距离无级放大 (Zoom >= 19, 20, 21, 22...):
+    // 逐级向上溯源搜索真实祖先瓦片 (从 iz-1 溯源至 18 或更低)，裁切对应区域并以高品质双三次平滑放大至 256x256
     if (iz >= 19) {
-        int pz = iz - 1;
-        int px = ix >> 1;
-        int py = iy >> 1;
-        for (const QString &baseDir : m_searchDirs) {
-            const QString parentPath = QString("%1/%2/%3/%4.png").arg(baseDir).arg(pz).arg(px).arg(py);
-            if (QFile::exists(parentPath)) {
-                QImage parentImg(parentPath);
-                if (!parentImg.isNull()) {
-                    int subX = (ix % 2) * 128;
-                    int subY = (iy % 2) * 128;
-                    QImage scaled = parentImg.copy(subX, subY, 128, 128).scaled(256, 256, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
-                    QByteArray bytes;
-                    QBuffer buffer(&bytes);
-                    buffer.open(QIODevice::WriteOnly);
-                    scaled.save(&buffer, "PNG");
-                    sendResponse(socket, bytes, "image/png");
-                    return;
+        for (int pz = iz - 1; pz >= 17; --pz) {
+            int shift = iz - pz;
+            int px = ix >> shift;
+            int py = iy >> shift;
+            for (const QString &baseDir : m_searchDirs) {
+                const QString parentPath = QString("%1/%2/%3/%4.png").arg(baseDir).arg(pz).arg(px).arg(py);
+                QFileInfo pfi(parentPath);
+                if (pfi.exists() && pfi.size() != 4235 && pfi.size() > 500) {
+                    QImage parentImg(parentPath);
+                    if (!parentImg.isNull() && parentImg.width() == 256) {
+                        double factor = 1 << shift;
+                        double subTileSize = 256.0 / factor;
+                        double subX = (ix - (px << shift)) * subTileSize;
+                        double subY = (iy - (py << shift)) * subTileSize;
+
+                        QImage subImg = parentImg.copy(qRound(subX), qRound(subY), qMax(1, qRound(subTileSize)), qMax(1, qRound(subTileSize)));
+                        QImage scaled = subImg.scaled(256, 256, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+
+                        QByteArray bytes;
+                        QBuffer buffer(&bytes);
+                        buffer.open(QIODevice::WriteOnly);
+                        scaled.save(&buffer, "PNG");
+                        sendResponse(socket, bytes, "image/png");
+                        return;
+                    }
                 }
             }
         }
