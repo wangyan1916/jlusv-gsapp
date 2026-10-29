@@ -2,6 +2,8 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QImage>
+#include <QBuffer>
 #include <QRegularExpression>
 #include <QDebug>
 
@@ -68,7 +70,7 @@ void LocalTileServer::handleRequest(QTcpSocket *socket, const QString &requestLi
     const QString x = match.captured(2);
     const QString y = match.captured(3);
 
-    // 搜索本地瓦片目录
+    // 1. 优先搜索本地精准切片
     for (const QString &baseDir : m_searchDirs) {
         const QString filePath = QString("%1/%2/%3/%4.png").arg(baseDir, z, x, y);
         if (QFile::exists(filePath)) {
@@ -76,6 +78,34 @@ void LocalTileServer::handleRequest(QTcpSocket *socket, const QString &requestLi
             if (file.open(QIODevice::ReadOnly)) {
                 sendResponse(socket, file.readAll(), "image/png");
                 return;
+            }
+        }
+    }
+
+    // 2. 超近距离打点支持 (Zoom 20, 21, 22):
+    // 若当前高层级瓦片不存在，从上一级 (z-1) 对应象限切片裁切并放大 (Smooth 256x256)
+    int iz = z.toInt();
+    int ix = x.toInt();
+    int iy = y.toInt();
+    if (iz >= 19) {
+        int pz = iz - 1;
+        int px = ix >> 1;
+        int py = iy >> 1;
+        for (const QString &baseDir : m_searchDirs) {
+            const QString parentPath = QString("%1/%2/%3/%4.png").arg(baseDir).arg(pz).arg(px).arg(py);
+            if (QFile::exists(parentPath)) {
+                QImage parentImg(parentPath);
+                if (!parentImg.isNull()) {
+                    int subX = (ix % 2) * 128;
+                    int subY = (iy % 2) * 128;
+                    QImage scaled = parentImg.copy(subX, subY, 128, 128).scaled(256, 256, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+                    QByteArray bytes;
+                    QBuffer buffer(&bytes);
+                    buffer.open(QIODevice::WriteOnly);
+                    scaled.save(&buffer, "PNG");
+                    sendResponse(socket, bytes, "image/png");
+                    return;
+                }
             }
         }
     }

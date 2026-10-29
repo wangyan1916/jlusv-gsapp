@@ -11,7 +11,7 @@ Item {
         id: mapPlugin
         name: "osm"
 
-        // 连接本地离线瓦片服务器 (http://127.0.0.1:18080)
+        // 本地离线高分卫星瓦片服务器 (http://127.0.0.1:18080)
         PluginParameter {
             name: "osm.mapping.custom.host"
             value: "http://127.0.0.1:18080/"
@@ -24,10 +24,6 @@ Item {
             name: "osm.mapping.providersrepository.disabled"
             value: true
         }
-        PluginParameter {
-            name: "osm.mapping.cache.directory"
-            value: "./tile_cache"
-        }
     }
 
     Map {
@@ -35,13 +31,12 @@ Item {
         anchors.fill: parent
         plugin: mapPlugin
 
-        // 默认定位至吉林大学中心校区 晏湖 (43.8247°N, 125.2868°E)
+        // 默认视野：吉林大学中心校区 晏湖 (43.8247°N, 125.2868°E)
         center: QtPositioning.coordinate(43.8247, 125.2868)
-        zoomLevel: 17
-        minimumZoomLevel: 14
-        maximumZoomLevel: 18
+        zoomLevel: 18.0
+        minimumZoomLevel: 16.0  // 锁定当前晏湖校区范围，防止误缩放到全城
+        maximumZoomLevel: 21.0  // 允许超大幅度放大，精细点选航点
 
-        // 当支持的地图类型加载完毕后，安全切换至自定义/本地离线图层
         onSupportedMapTypesChanged: {
             for (var i = 0; i < supportedMapTypes.length; ++i) {
                 if (supportedMapTypes[i].style === MapType.CustomMap) {
@@ -67,21 +62,21 @@ Item {
             model: mapBridge.waypointsQml
             delegate: MapQuickItem {
                 coordinate: modelData
-                anchorPoint.x: 12
-                anchorPoint.y: 12
+                anchorPoint.x: 14
+                anchorPoint.y: 14
                 sourceItem: Rectangle {
-                    width: 24
-                    height: 24
-                    radius: 12
-                    color: "#FF5252"
+                    width: 28
+                    height: 28
+                    radius: 14
+                    color: "#E53935"
                     border.color: "white"
-                    border.width: 2
+                    border.width: 2.5
                     Text {
                         anchors.centerIn: parent
                         text: (index + 1).toString()
                         color: "white"
                         font.bold: true
-                        font.pixelSize: 11
+                        font.pixelSize: 12
                     }
                 }
             }
@@ -91,29 +86,28 @@ Item {
         MapQuickItem {
             id: boatMarker
             coordinate: QtPositioning.coordinate(mapBridge.boatLat, mapBridge.boatLon)
-            anchorPoint.x: 16
-            anchorPoint.y: 16
+            anchorPoint.x: 18
+            anchorPoint.y: 18
             visible: mapBridge.boatLat !== 0.0 || mapBridge.boatLon !== 0.0
 
             sourceItem: Item {
-                width: 32
-                height: 32
+                width: 36
+                height: 36
                 rotation: mapBridge.boatHeading
 
-                // 船艏三角箭头
                 Canvas {
                     anchors.fill: parent
                     onPaint: {
                         var ctx = getContext("2d");
                         ctx.reset();
-                        ctx.fillStyle = "#FFEB3B";
+                        ctx.fillStyle = "#FFEA00";
                         ctx.strokeStyle = "#D50000";
-                        ctx.lineWidth = 2;
+                        ctx.lineWidth = 2.5;
                         ctx.beginPath();
-                        ctx.moveTo(16, 2);   // 船艏尖端
-                        ctx.lineTo(28, 28);  // 右船尾
-                        ctx.lineTo(16, 22);  // 尾部凹槽
-                        ctx.lineTo(4, 28);   // 左船尾
+                        ctx.moveTo(18, 2);
+                        ctx.lineTo(32, 32);
+                        ctx.lineTo(18, 25);
+                        ctx.lineTo(4, 32);
                         ctx.closePath();
                         ctx.fill();
                         ctx.stroke();
@@ -122,37 +116,132 @@ Item {
             }
         }
 
-        // 鼠标打点交互与拖拽地图
+        // 鼠标交互：滚轮无级缩放 + 左键点选航点 + 鼠标拖拽平移
         MouseArea {
             id: mouseArea
             anchors.fill: parent
             hoverEnabled: true
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
 
-            onClicked: {
-                var coord = map.toCoordinate(Qt.point(mouse.x, mouse.y));
-                if (coord.isValid) {
-                    mapBridge.addWaypointFromMap(coord.latitude, coord.longitude, 1.2);
+            property real lastX: 0
+            property real lastY: 0
+            property bool isDragging: false
+            property real pressX: 0
+            property real pressY: 0
+
+            onPressed: {
+                pressX = mouse.x;
+                pressY = mouse.y;
+                lastX = mouse.x;
+                lastY = mouse.y;
+                isDragging = false;
+            }
+
+            onPositionChanged: {
+                if (mouse.buttons & (Qt.LeftButton | Qt.RightButton)) {
+                    var dx = mouse.x - lastX;
+                    var dy = mouse.y - lastY;
+                    var totalDist = Math.abs(mouse.x - pressX) + Math.abs(mouse.y - pressY);
+                    if (totalDist > 5) {
+                        isDragging = true;
+                        map.pan(-dx, -dy);
+                    }
+                    lastX = mouse.x;
+                    lastY = mouse.y;
                 }
+            }
+
+            onReleased: {
+                if (!isDragging && mouse.button === Qt.LeftButton) {
+                    var coord = map.toCoordinate(Qt.point(mouse.x, mouse.y));
+                    if (coord.isValid) {
+                        mapBridge.addWaypointFromMap(coord.latitude, coord.longitude, 1.2);
+                    }
+                }
+                isDragging = false;
+            }
+
+            // 鼠标滚轮放大/缩小地图
+            onWheel: {
+                if (wheel.angleDelta.y > 0) {
+                    map.zoomLevel = Math.min(map.maximumZoomLevel, map.zoomLevel + 0.5);
+                } else if (wheel.angleDelta.y < 0) {
+                    map.zoomLevel = Math.max(map.minimumZoomLevel, map.zoomLevel - 0.5);
+                }
+                wheel.accepted = true;
             }
         }
     }
 
-    // 快捷居中按钮：定位晏湖 / 锁定船只
+    // 悬浮缩放控制按钮组 (+ / -)
+    Column {
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.margins: 20
+        spacing: 8
+
+        Rectangle {
+            width: 40
+            height: 40
+            radius: 8
+            color: "#FFFFFF"
+            border.color: "#BDBDBD"
+            border.width: 1
+            opacity: 0.92
+
+            Text {
+                anchors.centerIn: parent
+                text: "+"
+                font.pixelSize: 24
+                font.bold: true
+                color: "#212121"
+            }
+            MouseArea {
+                anchors.fill: parent
+                onClicked: map.zoomLevel = Math.min(map.maximumZoomLevel, map.zoomLevel + 0.5)
+            }
+        }
+
+        Rectangle {
+            width: 40
+            height: 40
+            radius: 8
+            color: "#FFFFFF"
+            border.color: "#BDBDBD"
+            border.width: 1
+            opacity: 0.92
+
+            Text {
+                anchors.centerIn: parent
+                text: "−"
+                font.pixelSize: 24
+                font.bold: true
+                color: "#212121"
+            }
+            MouseArea {
+                anchors.fill: parent
+                onClicked: map.zoomLevel = Math.max(map.minimumZoomLevel, map.zoomLevel - 0.5)
+            }
+        }
+    }
+
+    // 快捷居中按钮：重置晏湖 / 锁定船只
     Rectangle {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: 20
-        width: 100
-        height: 36
-        radius: 6
-        color: "#2196F3"
-        opacity: 0.9
+        width: 110
+        height: 38
+        radius: 8
+        color: "#1976D2"
+        opacity: 0.92
 
         Text {
             anchors.centerIn: parent
             text: (mapBridge.boatLat !== 0.0 && mapBridge.boatLon !== 0.0) ? "锁定船只" : "居中晏湖"
             color: "white"
             font.bold: true
+            font.pixelSize: 13
         }
 
         MouseArea {
@@ -162,7 +251,7 @@ Item {
                     map.center = QtPositioning.coordinate(mapBridge.boatLat, mapBridge.boatLon);
                 } else {
                     map.center = QtPositioning.coordinate(43.8247, 125.2868);
-                    map.zoomLevel = 17;
+                    map.zoomLevel = 18.5;
                 }
             }
         }
