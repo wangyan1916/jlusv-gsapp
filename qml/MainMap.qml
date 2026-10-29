@@ -15,8 +15,8 @@ Item {
     readonly property real minZoom: 16.0
     readonly property real maxZoom: 22.0
 
-    // 晏湖中心精准坐标 (吉林大学前卫南区晏湖水心 - GCJ-02 卫星图绝对居中)
-    readonly property var yanhuCenter: QtPositioning.coordinate(43.82760, 125.29632)
+    // 晏湖中心精准坐标 (吉林大学前卫南区晏湖水心及湖心岛精确像素锚定)
+    readonly property var yanhuCenter: QtPositioning.coordinate(43.82544, 125.28832)
 
     function applyZoom(newZoom) {
         currentZoom = Math.max(minZoom, Math.min(maxZoom, newZoom));
