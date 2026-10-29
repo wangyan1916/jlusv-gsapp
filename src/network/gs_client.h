@@ -59,7 +59,7 @@ private slots:
     void onSubmitReply(QNetworkReply *reply);
 
 private:
-    QString m_baseUrl{"http://192.168.4.1"};
+    QString m_baseUrl{"http://192.168.188.2"};
     QNetworkAccessManager *m_nam;
     QTimer *m_pollTimer;
     UsvTelemetry m_latestTelemetry;

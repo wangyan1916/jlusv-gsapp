@@ -28,6 +28,8 @@ set(SOURCES
     src/network/gs_client.cpp
     src/map/coord_transform.h
     src/map/coord_transform.cpp
+    src/map/local_tile_server.h
+    src/map/local_tile_server.cpp
     src/map/map_bridge.h
     src/map/map_bridge.cpp
     qml/qml.qrc

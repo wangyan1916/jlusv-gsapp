@@ -10,6 +10,7 @@
 #include <QTextEdit>
 #include "network/gs_client.h"
 #include "map/map_bridge.h"
+#include "map/local_tile_server.h"
 
 namespace jlusv {
 
@@ -34,6 +35,7 @@ private:
     void setupUi();
     void logMessage(const QString &msg);
 
+    LocalTileServer *m_tileServer;
     GsClient *m_client;
     MapBridge *m_bridge;
 

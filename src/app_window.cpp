@@ -11,9 +11,11 @@ namespace jlusv {
 
 AppWindow::AppWindow(QWidget *parent)
     : QMainWindow(parent)
+    , m_tileServer(new LocalTileServer(18080, this))
     , m_client(new GsClient(this))
     , m_bridge(new MapBridge(this))
 {
+    m_tileServer->start();
     setupUi();
 
     connect(m_client, &GsClient::connectionStatusChanged, this, &AppWindow::onConnectionStatusChanged);
@@ -53,7 +55,7 @@ void AppWindow::setupUi() {
     // 通信连接卡片
     auto *connGroup = new QGroupBox("地面站网关连接", panelWidget);
     auto *connLayout = new QGridLayout(connGroup);
-    m_ipEdit = new QLineEdit("http://192.168.4.1", connGroup);
+    m_ipEdit = new QLineEdit("http://192.168.188.2", connGroup);
     m_connectBtn = new QPushButton("连接", connGroup);
     m_statusLabel = new QLabel("状态: 未连接", connGroup);
     m_statusLabel->setStyleSheet("color: red; font-weight: bold;");

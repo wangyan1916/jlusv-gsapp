@@ -11,10 +11,10 @@ Item {
         id: mapPlugin
         name: "osm"
 
-        // 默认配置高德卫星/吉林一号或自定义本地离线瓦片服务
+        // 连接本地离线瓦片服务器 (http://127.0.0.1:18080)
         PluginParameter {
             name: "osm.mapping.custom.host"
-            value: "https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}"
+            value: "http://127.0.0.1:18080/"
         }
         PluginParameter {
             name: "osm.useragent"
@@ -34,10 +34,26 @@ Item {
         id: map
         anchors.fill: parent
         plugin: mapPlugin
-        center: QtPositioning.coordinate(31.2304, 121.4737) // 默认居中位置，收到数据后自动同步
-        zoomLevel: 16
-        minimumZoomLevel: 3
-        maximumZoomLevel: 19
+
+        // 默认定位至吉林大学中心校区 晏湖 (43.8247°N, 125.2868°E)
+        center: QtPositioning.coordinate(43.8247, 125.2868)
+        zoomLevel: 17
+        minimumZoomLevel: 14
+        maximumZoomLevel: 18
+
+        activeMapType: supportedMapTypes.length > 0 ? supportedMapTypes[supportedMapTypes.length - 1] : null
+
+        Component.onCompleted: {
+            for (var i = 0; i < supportedMapTypes.length; ++i) {
+                if (supportedMapTypes[i].name.toLowerCase().indexOf("custom") !== -1) {
+                    activeMapType = supportedMapTypes[i];
+                    break;
+                }
+            }
+            if (!activeMapType && supportedMapTypes.length > 0) {
+                activeMapType = supportedMapTypes[supportedMapTypes.length - 1];
+            }
+        }
 
         // 循迹折线轨迹
         MapPolyline {
@@ -122,7 +138,7 @@ Item {
         }
     }
 
-    // 快捷居中按钮
+    // 快捷居中按钮：定位晏湖 / 锁定船只
     Rectangle {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
@@ -131,11 +147,11 @@ Item {
         height: 36
         radius: 6
         color: "#2196F3"
-        opacity: 0.85
+        opacity: 0.9
 
         Text {
             anchors.centerIn: parent
-            text: "锁定船只"
+            text: (mapBridge.boatLat !== 0.0 && mapBridge.boatLon !== 0.0) ? "锁定船只" : "居中晏湖"
             color: "white"
             font.bold: true
         }
@@ -145,6 +161,9 @@ Item {
             onClicked: {
                 if (mapBridge.boatLat !== 0.0 && mapBridge.boatLon !== 0.0) {
                     map.center = QtPositioning.coordinate(mapBridge.boatLat, mapBridge.boatLon);
+                } else {
+                    map.center = QtPositioning.coordinate(43.8247, 125.2868);
+                    map.zoomLevel = 17;
                 }
             }
         }
