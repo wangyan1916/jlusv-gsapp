@@ -6,6 +6,13 @@
 #include <QQmlContext>
 #include <QDateTime>
 #include <QMessageBox>
+#include <QApplication>
+#include <QClipboard>
+#include <QMenu>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QRegularExpression>
 
 namespace jlusv {
 
@@ -132,19 +139,35 @@ void AppWindow::setupUi() {
     m_undoBtn = new QPushButton("撤销航点", missionGroup);
     m_clearBtn = new QPushButton("清空航线", missionGroup);
 
+    m_copyBtn = new QToolButton(missionGroup);
+    m_copyBtn->setText("复制航点");
+    m_copyBtn->setPopupMode(QToolButton::MenuButtonPopup);
+    m_copyBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+    auto *copyMenu = new QMenu(m_copyBtn);
+    copyMenu->addAction("复制为 JSON 格式 (推荐)", this, &AppWindow::onCopyWaypointsJson);
+    copyMenu->addAction("复制为 纯文本经纬度 (纬度, 经度)", this, &AppWindow::onCopyWaypointsText);
+    m_copyBtn->setMenu(copyMenu);
+
+    m_pasteBtn = new QPushButton("粘贴/导入航点", missionGroup);
+
     missionLayout->addWidget(m_waypointCountLabel, 0, 0, 1, 2);
     missionLayout->addWidget(new QLabel("期望巡航速度:"), 1, 0);
     missionLayout->addWidget(m_speedSpin, 1, 1);
     missionLayout->addWidget(m_undoBtn, 2, 0);
     missionLayout->addWidget(m_clearBtn, 2, 1);
-    missionLayout->addWidget(m_publishBtn, 3, 0, 1, 2);
-    missionLayout->addWidget(m_stopBtn, 4, 0, 1, 2);
+    missionLayout->addWidget(m_copyBtn, 3, 0);
+    missionLayout->addWidget(m_pasteBtn, 3, 1);
+    missionLayout->addWidget(m_publishBtn, 4, 0, 1, 2);
+    missionLayout->addWidget(m_stopBtn, 5, 0, 1, 2);
     panelLayout->addWidget(missionGroup);
 
     connect(m_publishBtn, &QPushButton::clicked, this, &AppWindow::onPublishWaypointsClicked);
     connect(m_stopBtn, &QPushButton::clicked, this, &AppWindow::onEmergencyStopClicked);
     connect(m_clearBtn, &QPushButton::clicked, this, &AppWindow::onClearWaypointsClicked);
     connect(m_undoBtn, &QPushButton::clicked, this, &AppWindow::onUndoWaypointClicked);
+    connect(m_copyBtn, &QToolButton::clicked, this, &AppWindow::onCopyWaypointsJson);
+    connect(m_pasteBtn, &QPushButton::clicked, this, &AppWindow::onPasteWaypointsClicked);
 
     // 系统日志框
     auto *logGroup = new QGroupBox("操作日志", panelWidget);
@@ -234,6 +257,133 @@ void AppWindow::onClearWaypointsClicked() {
 void AppWindow::onUndoWaypointClicked() {
     m_bridge->removeLastWaypoint();
     logMessage("撤销最后一个航点。");
+}
+
+void AppWindow::onCopyWaypointsJson() {
+    const auto &wps = m_bridge->rawWaypoints();
+    if (wps.isEmpty()) {
+        QMessageBox::information(this, "提示", "当前航点列表为空，请先在地图上点击添加航点！");
+        return;
+    }
+
+    QJsonArray arr;
+    for (int i = 0; i < wps.size(); ++i) {
+        QJsonObject obj;
+        obj.insert("index", i + 1);
+        obj.insert("lat_deg", QString::number(wps[i].latDeg, 'f', 7).toDouble());
+        obj.insert("lon_deg", QString::number(wps[i].lonDeg, 'f', 7).toDouble());
+        obj.insert("speed_mps", QString::number(wps[i].speedMps, 'f', 2).toDouble());
+        arr.append(obj);
+    }
+
+    const QString jsonText = QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Indented));
+    QApplication::clipboard()->setText(jsonText);
+    logMessage(QString("已将 %1 个航点坐标复制到剪贴板 (JSON 格式)。").arg(wps.size()));
+    for (int i = 0; i < wps.size(); ++i) {
+        logMessage(QString("  #%1: 纬度 %2, 经度 %3 (航速 %4 m/s)")
+            .arg(i + 1)
+            .arg(wps[i].latDeg, 0, 'f', 7)
+            .arg(wps[i].lonDeg, 0, 'f', 7)
+            .arg(wps[i].speedMps, 0, 'f', 2));
+    }
+}
+
+void AppWindow::onCopyWaypointsText() {
+    const auto &wps = m_bridge->rawWaypoints();
+    if (wps.isEmpty()) {
+        QMessageBox::information(this, "提示", "当前航点列表为空，请先在地图上点击添加航点！");
+        return;
+    }
+
+    QStringList lines;
+    for (int i = 0; i < wps.size(); ++i) {
+        lines << QString("%1, %2").arg(wps[i].latDeg, 0, 'f', 7).arg(wps[i].lonDeg, 0, 'f', 7);
+    }
+    const QString text = lines.join("\n");
+    QApplication::clipboard()->setText(text);
+    logMessage(QString("已将 %1 个航点坐标复制到剪贴板 (纯经纬度文本格式)。").arg(wps.size()));
+}
+
+void AppWindow::onPasteWaypointsClicked() {
+    const QString text = QApplication::clipboard()->text().trimmed();
+    if (text.isEmpty()) {
+        QMessageBox::information(this, "提示", "系统剪贴板为空，请先复制航点数据！");
+        return;
+    }
+
+    QVector<Waypoint> imported;
+    const double defaultSpeed = m_speedSpin->value();
+
+    // 1. 尝试解析 JSON 格式
+    QJsonParseError jsonErr;
+    QJsonDocument doc = QJsonDocument::fromJson(text.toUtf8(), &jsonErr);
+    if (jsonErr.error == QJsonParseError::NoError && doc.isArray()) {
+        const QJsonArray arr = doc.array();
+        for (const auto &val : arr) {
+            if (val.isObject()) {
+                const QJsonObject obj = val.toObject();
+                Waypoint wp;
+                // 支持 lat / lat_deg
+                if (obj.contains("lat")) wp.latDeg = obj.value("lat").toDouble();
+                else if (obj.contains("lat_deg")) wp.latDeg = obj.value("lat_deg").toDouble();
+                else continue;
+
+                // 支持 lon / lon_deg
+                if (obj.contains("lon")) wp.lonDeg = obj.value("lon").toDouble();
+                else if (obj.contains("lon_deg")) wp.lonDeg = obj.value("lon_deg").toDouble();
+                else continue;
+
+                // 支持 speed_mps / speed
+                if (obj.contains("speed_mps")) wp.speedMps = obj.value("speed_mps").toDouble();
+                else if (obj.contains("speed")) wp.speedMps = obj.value("speed").toDouble();
+                else wp.speedMps = defaultSpeed;
+
+                if (wp.latDeg >= -90.0 && wp.latDeg <= 90.0 && wp.lonDeg >= -180.0 && wp.lonDeg <= 180.0) {
+                    imported.append(wp);
+                }
+            }
+        }
+    }
+
+    // 2. 若非 JSON，尝试按行纯文本解析 (如: 43.82544, 125.28832 或 #1: 43.82...)
+    if (imported.isEmpty()) {
+        const QStringList lines = text.split('\n', QString::SkipEmptyParts);
+        for (QString line : lines) {
+            line = line.trimmed();
+            if (line.isEmpty() || line.startsWith('#') || line.startsWith("//")) continue;
+            int colonIdx = line.indexOf(':');
+            if (colonIdx >= 0 && colonIdx < 5) {
+                line = line.mid(colonIdx + 1).trimmed();
+            }
+            static const QRegularExpression re(R"(([+-]?\d+\.?\d*)\s*[,，\s]\s*([+-]?\d+\.?\d*))");
+            const auto match = re.match(line);
+            if (match.hasMatch()) {
+                double lat = match.captured(1).toDouble();
+                double lon = match.captured(2).toDouble();
+                if (lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) {
+                    Waypoint wp;
+                    wp.latDeg = lat;
+                    wp.lonDeg = lon;
+                    wp.speedMps = defaultSpeed;
+                    imported.append(wp);
+                }
+            }
+        }
+    }
+
+    if (imported.isEmpty()) {
+        QMessageBox::warning(this, "解析失败", "无法从剪贴板内容识别有效的经纬度航点数据。\n支持格式：\n1. JSON 数组: [{\"lat\": 43.825, \"lon\": 125.288}, ...]\n2. 纯文本列表: 43.825440, 125.288320 (每行一个航点)");
+        return;
+    }
+
+    if (imported.size() > 16) {
+        imported.resize(16);
+        logMessage("导入航点超过 16 个上限，已自动保留前 16 个航点。");
+    }
+
+    m_bridge->setRawWaypoints(imported);
+    logMessage(QString("已成功从剪贴板导入 %1 个航点并更新到地图！").arg(imported.size()));
+    QMessageBox::information(this, "导入成功", QString("已成功导入 %1 个航点，航线已在地图上绘制显示！").arg(imported.size()));
 }
 
 void AppWindow::onMissionResult(bool success, const QString &message) {

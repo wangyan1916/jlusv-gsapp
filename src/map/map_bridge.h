@@ -35,6 +35,8 @@ public:
 
     QVariantList waypointsQml() const;
     const QVector<Waypoint>& rawWaypoints() const { return m_waypoints; }
+    void setRawWaypoints(const QVector<Waypoint> &waypoints);
+    void addRawWaypoint(double wgsLat, double wgsLon, double speed = 1.2);
 
     Q_INVOKABLE void addWaypointFromMap(double lat, double lon, double speed = 1.2);
     Q_INVOKABLE void clearWaypoints();

@@ -67,6 +67,20 @@ void MapBridge::addWaypointFromMap(double lat, double lon, double speed) {
     emit waypointsChanged();
 }
 
+void MapBridge::setRawWaypoints(const QVector<Waypoint> &waypoints) {
+    m_waypoints = waypoints;
+    emit waypointsChanged();
+}
+
+void MapBridge::addRawWaypoint(double wgsLat, double wgsLon, double speed) {
+    Waypoint wp;
+    wp.latDeg = wgsLat;
+    wp.lonDeg = wgsLon;
+    wp.speedMps = speed;
+    m_waypoints.append(wp);
+    emit waypointsChanged();
+}
+
 void MapBridge::clearWaypoints() {
     m_waypoints.clear();
     emit waypointsChanged();

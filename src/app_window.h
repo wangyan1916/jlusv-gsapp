@@ -5,6 +5,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QToolButton>
 #include <QCheckBox>
 #include <QDoubleSpinBox>
 #include <QTextEdit>
@@ -29,6 +30,9 @@ private slots:
     void onEmergencyStopClicked();
     void onClearWaypointsClicked();
     void onUndoWaypointClicked();
+    void onCopyWaypointsJson();
+    void onCopyWaypointsText();
+    void onPasteWaypointsClicked();
     void onGcj02Toggled(bool checked);
 
 private:
@@ -61,6 +65,8 @@ private:
     QPushButton *m_stopBtn;
     QPushButton *m_clearBtn;
     QPushButton *m_undoBtn;
+    QToolButton *m_copyBtn;
+    QPushButton *m_pasteBtn;
     QTextEdit *m_logEdit;
 };
 
