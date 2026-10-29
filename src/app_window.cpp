@@ -423,7 +423,9 @@ void AppWindow::onPasteWaypointsClicked() {
 
 void AppWindow::onMissionResult(bool success, const QString &message) {
     logMessage(QString("任务应答: [%1] %2").arg(success ? "成功" : "失败", message));
-    if (!success) {
+    if (success) {
+        QMessageBox::information(this, "任务发布成功", message);
+    } else {
         QMessageBox::critical(this, "错误", message);
     }
 }

@@ -392,23 +392,43 @@ void GsClient::doSubmitWaypoints(const QVector<Waypoint> &waypoints, int ttlSeco
 
             if (stage == "RP_RECEIVED") {
                 if (status == "OK") {
-                    if (execState == "Running" || execState == "Waiting") {
+                    const QString sUpper = execState.toUpper();
+                    const QString rUpper = execReason.toUpper();
+
+                    if (sUpper == "RUNNING" || sUpper == "RUN") {
                         done = true;
-                        emit missionResult(true, QString("航点已在船端生效开始执行！状态: %1").arg(execState));
+                        emit missionResult(true, "航点已在船端生效，动力系统已启动循迹！");
                         return;
                     }
-                    if (execState == "SensorInvalid") {
+                    if (sUpper == "STARTING") {
                         done = true;
-                        emit missionResult(false, "船端接收航点但无法执行: 传感器数据无效 (缺少新鲜航向/RTK定位/航速)");
+                        emit missionResult(true, "航点已在船端生效，零输出使能中 (STARTING)...");
                         return;
                     }
-                    if (execState == "Stopping" || execReason == "UserStop") {
+                    if (sUpper == "WAITING_IPC" || sUpper == "WAITING" || sUpper == "IDLE" || sUpper.isEmpty()) {
+                        done = true;
+                        QString msg = "航点已成功被船端接收 (LoRa ACK确认)！当前状态: 等待执行条件 (WAITING_IPC)。";
+                        if (qFuzzyIsNull(m_latestTelemetry.latDeg) && qFuzzyIsNull(m_latestTelemetry.lonDeg)) {
+                            msg += "\n提示: 船端当前经纬度为 0.000000, 0.000000 (GNSS 尚未完成有效水面定位锁定)。船端主控保护机制已启动，一旦获取有效 RTK/GNSS 位置与航向，即可自动起航！";
+                        } else {
+                            msg += "\n提示: 船端正在等待传感器反馈就绪 (需要有效航向、航速及 RTK 定位)，满足条件后自动起航。";
+                        }
+                        emit missionResult(true, msg);
+                        return;
+                    }
+                    if (sUpper == "SENSOR_INVALID" || sUpper == "SENSORINVALID" || rUpper == "SENSOR_INVALID") {
+                        done = true;
+                        emit missionResult(false, "船端接收航点但无法执行: 传感器数据无效或过期 (缺少新鲜航向/RTK定位/航速)");
+                        return;
+                    }
+                    if (sUpper == "STOPPING" || sUpper == "STOPPED" || rUpper == "USER_STOP" || rUpper == "USERSTOP") {
                         done = true;
                         emit missionResult(false, "船端任务已被急停打断");
                         return;
                     }
-                    // 仍在过渡中
-                    emit missionProgress(QString("船端已接收航点 (LoRa ACK)，执行状态: %1...").arg(execState));
+                    done = true;
+                    emit missionResult(true, QString("航点已成功被船端接收 (LoRa ACK确认)！当前执行状态: %1").arg(execState));
+                    return;
                 } else {
                     done = true;
                     emit missionResult(false, QString("船端拒绝执行航点: status=%1, reason=%2").arg(status, reason));
@@ -504,7 +524,8 @@ void GsClient::doSubmitEmergencyStop(bool isRetry) {
             const QString status = obj.value("status").toString();
             const QString execState = obj.value("execution_state").toString();
 
-            if (stage == "RP_RECEIVED" || execState == "Stopping" || execState == "UserStop") {
+            const QString sUpper = execState.toUpper();
+            if (stage == "RP_RECEIVED" || sUpper == "STOPPING" || sUpper == "STOPPED" || sUpper == "USERSTOP" || sUpper == "USER_STOP") {
                 done = true;
                 emit missionResult(true, "紧急停船已在物理船端生效停机！");
                 return;
