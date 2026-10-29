@@ -27,6 +27,7 @@ AppWindow::AppWindow(QWidget *parent)
 
     connect(m_client, &GsClient::connectionStatusChanged, this, &AppWindow::onConnectionStatusChanged);
     connect(m_client, &GsClient::telemetryUpdated, this, &AppWindow::onTelemetryUpdated);
+    connect(m_client, &GsClient::missionProgress, this, &AppWindow::logMessage);
     connect(m_client, &GsClient::missionResult, this, &AppWindow::onMissionResult);
     connect(m_client, &GsClient::authStatusChanged, this, [this](bool ok, const QString &msg) {
         if (ok) {
@@ -93,6 +94,7 @@ void AppWindow::setupUi() {
     auto *statusGroup = new QGroupBox("船端遥测数据 (WGS-84 RTK)", panelWidget);
     auto *statusLayout = new QGridLayout(statusGroup);
     m_uidLabel = new QLabel("--", statusGroup);
+    m_modeLabel = new QLabel("--", statusGroup);
     m_rtkLabel = new QLabel("--", statusGroup);
     m_posLabel = new QLabel("--", statusGroup);
     m_headingLabel = new QLabel("--", statusGroup);
@@ -101,16 +103,18 @@ void AppWindow::setupUi() {
 
     statusLayout->addWidget(new QLabel("船只 UID:"), 0, 0);
     statusLayout->addWidget(m_uidLabel, 0, 1);
-    statusLayout->addWidget(new QLabel("RTK 解状态:"), 1, 0);
-    statusLayout->addWidget(m_rtkLabel, 1, 1);
-    statusLayout->addWidget(new QLabel("经纬度:"), 2, 0);
-    statusLayout->addWidget(m_posLabel, 2, 1);
-    statusLayout->addWidget(new QLabel("船艏向:"), 3, 0);
-    statusLayout->addWidget(m_headingLabel, 3, 1);
-    statusLayout->addWidget(new QLabel("对地航速:"), 4, 0);
-    statusLayout->addWidget(m_speedLabel, 4, 1);
-    statusLayout->addWidget(new QLabel("电池电压:"), 5, 0);
-    statusLayout->addWidget(m_batteryLabel, 5, 1);
+    statusLayout->addWidget(new QLabel("控制模式:"), 1, 0);
+    statusLayout->addWidget(m_modeLabel, 1, 1);
+    statusLayout->addWidget(new QLabel("RTK 解状态:"), 2, 0);
+    statusLayout->addWidget(m_rtkLabel, 2, 1);
+    statusLayout->addWidget(new QLabel("经纬度:"), 3, 0);
+    statusLayout->addWidget(m_posLabel, 3, 1);
+    statusLayout->addWidget(new QLabel("船艏向:"), 4, 0);
+    statusLayout->addWidget(m_headingLabel, 4, 1);
+    statusLayout->addWidget(new QLabel("对地航速:"), 5, 0);
+    statusLayout->addWidget(m_speedLabel, 5, 1);
+    statusLayout->addWidget(new QLabel("电池电压:"), 6, 0);
+    statusLayout->addWidget(m_batteryLabel, 6, 1);
     panelLayout->addWidget(statusGroup);
 
     // 地图与坐标系设置
@@ -145,8 +149,8 @@ void AppWindow::setupUi() {
     m_copyBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
 
     auto *copyMenu = new QMenu(m_copyBtn);
-    copyMenu->addAction("复制为 JSON 格式 (推荐)", this, &AppWindow::onCopyWaypointsJson);
-    copyMenu->addAction("复制为 纯文本经纬度 (纬度, 经度)", this, &AppWindow::onCopyWaypointsText);
+    copyMenu->addAction("复制为 标准文本 (每行: 纬度, 经度, 速度 m/s) [默认]", this, &AppWindow::onCopyWaypointsText);
+    copyMenu->addAction("复制为 JSON 格式", this, &AppWindow::onCopyWaypointsJson);
     m_copyBtn->setMenu(copyMenu);
 
     m_pasteBtn = new QPushButton("粘贴/导入航点", missionGroup);
@@ -166,7 +170,7 @@ void AppWindow::setupUi() {
     connect(m_stopBtn, &QPushButton::clicked, this, &AppWindow::onEmergencyStopClicked);
     connect(m_clearBtn, &QPushButton::clicked, this, &AppWindow::onClearWaypointsClicked);
     connect(m_undoBtn, &QPushButton::clicked, this, &AppWindow::onUndoWaypointClicked);
-    connect(m_copyBtn, &QToolButton::clicked, this, &AppWindow::onCopyWaypointsJson);
+    connect(m_copyBtn, &QToolButton::clicked, this, &AppWindow::onCopyWaypointsText);
     connect(m_pasteBtn, &QPushButton::clicked, this, &AppWindow::onPasteWaypointsClicked);
 
     // 系统日志框
@@ -215,6 +219,24 @@ void AppWindow::onConnectionStatusChanged(bool connected) {
 
 void AppWindow::onTelemetryUpdated(const UsvTelemetry &t) {
     m_uidLabel->setText(t.uid.isEmpty() ? "--" : t.uid);
+
+    if (t.controlOwner == 1 && t.controlState == 3) {
+        m_modeLabel->setText("MAIN / WAYPOINTS (循迹)");
+        m_modeLabel->setStyleSheet("color: green; font-weight: bold;");
+    } else if (t.controlOwner == 1 && t.controlState == 1) {
+        m_modeLabel->setText("MAIN / ACTUATOR (直控)");
+        m_modeLabel->setStyleSheet("color: #E65100; font-weight: bold;");
+    } else if (t.controlOwner == 1 && t.controlState == 2) {
+        m_modeLabel->setText("MAIN / HEADING (定向)");
+        m_modeLabel->setStyleSheet("color: #1565C0; font-weight: bold;");
+    } else if (t.controlOwner == 2) {
+        m_modeLabel->setText("IPC / 自动驾驶");
+        m_modeLabel->setStyleSheet("color: #6A1B9A; font-weight: bold;");
+    } else {
+        m_modeLabel->setText(t.controlOwnerStr + " / " + t.controlStateStr);
+        m_modeLabel->setStyleSheet("color: gray;");
+    }
+
     m_rtkLabel->setText(m_bridge->rtkStateText());
     m_posLabel->setText(QString("%1, %2").arg(t.latDeg, 0, 'f', 6).arg(t.lonDeg, 0, 'f', 6));
     m_headingLabel->setText(QString("%1°").arg(t.headingDeg, 0, 'f', 1));
@@ -297,11 +319,17 @@ void AppWindow::onCopyWaypointsText() {
 
     QStringList lines;
     for (int i = 0; i < wps.size(); ++i) {
-        lines << QString("%1, %2").arg(wps[i].latDeg, 0, 'f', 7).arg(wps[i].lonDeg, 0, 'f', 7);
+        lines << QString("%1, %2, %3 m/s")
+            .arg(wps[i].latDeg, 0, 'f', 7)
+            .arg(wps[i].lonDeg, 0, 'f', 7)
+            .arg(wps[i].speedMps, 0, 'f', 2);
     }
     const QString text = lines.join("\n");
     QApplication::clipboard()->setText(text);
-    logMessage(QString("已将 %1 个航点坐标复制到剪贴板 (纯经纬度文本格式)。").arg(wps.size()));
+    logMessage(QString("已将 %1 个航点坐标复制到剪贴板 (每行: 纬度, 经度, 速度 m/s)。").arg(wps.size()));
+    for (const auto &line : lines) {
+        logMessage("  " + line);
+    }
 }
 
 void AppWindow::onPasteWaypointsClicked() {
@@ -345,9 +373,9 @@ void AppWindow::onPasteWaypointsClicked() {
         }
     }
 
-    // 2. 若非 JSON，尝试按行纯文本解析 (如: 43.82544, 125.28832 或 #1: 43.82...)
+    // 2. 若非 JSON，按行纯文本解析 (每行: 纬度, 经度, 速度 m/s 或 纬度, 经度)
     if (imported.isEmpty()) {
-        const QStringList lines = text.split('\n', QString::SkipEmptyParts);
+        const QStringList lines = text.split('\n', Qt::SkipEmptyParts);
         for (QString line : lines) {
             line = line.trimmed();
             if (line.isEmpty() || line.startsWith('#') || line.startsWith("//")) continue;
@@ -355,16 +383,23 @@ void AppWindow::onPasteWaypointsClicked() {
             if (colonIdx >= 0 && colonIdx < 5) {
                 line = line.mid(colonIdx + 1).trimmed();
             }
-            static const QRegularExpression re(R"(([+-]?\d+\.?\d*)\s*[,，\s]\s*([+-]?\d+\.?\d*))");
+            line.remove("m/s", Qt::CaseInsensitive);
+            line.remove("mps", Qt::CaseInsensitive);
+
+            static const QRegularExpression re(R"(([+-]?\d+\.?\d*)\s*[,，\s]\s*([+-]?\d+\.?\d*)(?:\s*[,，\s]\s*([+-]?\d+\.?\d*))?)");
             const auto match = re.match(line);
             if (match.hasMatch()) {
                 double lat = match.captured(1).toDouble();
                 double lon = match.captured(2).toDouble();
+                double spd = defaultSpeed;
+                if (!match.captured(3).isEmpty()) {
+                    spd = match.captured(3).toDouble();
+                }
                 if (lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) {
                     Waypoint wp;
                     wp.latDeg = lat;
                     wp.lonDeg = lon;
-                    wp.speedMps = defaultSpeed;
+                    wp.speedMps = (spd > 0.05 && spd <= 10.0) ? spd : defaultSpeed;
                     imported.append(wp);
                 }
             }
@@ -372,7 +407,7 @@ void AppWindow::onPasteWaypointsClicked() {
     }
 
     if (imported.isEmpty()) {
-        QMessageBox::warning(this, "解析失败", "无法从剪贴板内容识别有效的经纬度航点数据。\n支持格式：\n1. JSON 数组: [{\"lat\": 43.825, \"lon\": 125.288}, ...]\n2. 纯文本列表: 43.825440, 125.288320 (每行一个航点)");
+        QMessageBox::warning(this, "解析失败", "无法从剪贴板内容识别有效的经纬度航点数据。\n支持格式：\n1. 每行: 纬度, 经度, 速度 m/s (如: 43.8254400, 125.2883200, 1.20 m/s)\n2. JSON 数组: [{\"lat\": 43.825, \"lon\": 125.288}, ...]");
         return;
     }
 

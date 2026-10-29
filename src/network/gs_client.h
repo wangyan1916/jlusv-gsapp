@@ -33,6 +33,18 @@ struct UsvTelemetry {
     int satellites = 0;
     double batteryV = 0.0;
     QString positionSource;
+
+    // 船端任务与模式就绪状态
+    bool taskReady = false;
+    bool deviceOnline = false;
+    int controlOwner = 0;      // 1=Main, 2=Ipc
+    int controlState = 0;      // 1=Actuator, 2=HeadingSpeed, 3=Waypoints
+    uint32_t controlRevision = 0;
+    QString controlOwnerStr{"UNKNOWN"};
+    QString controlStateStr{"UNKNOWN"};
+    QString controlPhase{"UNKNOWN"};
+    QString controlReason{"UNKNOWN"};
+    QString loraState;
 };
 
 class GsClient : public QObject {
@@ -46,6 +58,7 @@ public:
     void setPassword(const QString &pwd);
     QString password() const { return m_password; }
     bool isAuthenticated() const { return m_authenticated; }
+    const UsvTelemetry& latestTelemetry() const { return m_latestTelemetry; }
 
     void startPolling(int intervalMs = 500);
     void stopPolling();
@@ -53,12 +66,16 @@ public:
     // 网关安全认证
     void login(std::function<void(bool ok, const QString &err)> callback = nullptr);
 
+    // 模式切换 (1=Main, 3=Waypoints)
+    void switchControlMode(int owner, int state, std::function<void(bool ok, const QString &msg)> callback);
+
     // 任务发布指令
     void submitWaypoints(const QVector<Waypoint> &waypoints, int ttlSeconds = 300);
     void submitEmergencyStop();
 
 signals:
     void telemetryUpdated(const UsvTelemetry &telemetry);
+    void missionProgress(const QString &message);
     void missionResult(bool success, const QString &message);
     void connectionStatusChanged(bool connected);
     void authStatusChanged(bool authenticated, const QString &message);
@@ -70,6 +87,10 @@ private slots:
 private:
     void doSubmitWaypoints(const QVector<Waypoint> &waypoints, int ttlSeconds, bool isRetry);
     void doSubmitEmergencyStop(bool isRetry);
+    void trackOperation(const QString &operationId,
+                        int timeoutMs,
+                        std::function<void(const QJsonObject &obj, bool &done)> onUpdate,
+                        std::function<void(const QString &err)> onTimeout);
     QString generateOperationId();
 
     QString m_baseUrl{"http://192.168.188.2"};

@@ -52,6 +52,7 @@ private:
     QLabel *m_statusLabel;
 
     QLabel *m_uidLabel;
+    QLabel *m_modeLabel;
     QLabel *m_rtkLabel;
     QLabel *m_posLabel;
     QLabel *m_headingLabel;
