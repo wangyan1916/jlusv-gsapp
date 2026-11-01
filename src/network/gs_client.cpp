@@ -1,549 +1,588 @@
 #include "gs_client.h"
 #include <QJsonDocument>
-#include <QJsonObject>
-#include <QJsonArray>
-#include <QUrl>
+#include <QNetworkCookieJar>
 #include <QUuid>
-#include <QDebug>
+#include <cmath>
+#include <cstdint>
 
 namespace jlusv {
+namespace {
+quint32 number(const QJsonObject &obj, const char *key) {
+    const double n = obj.value(key).toDouble(-1);
+    return std::isfinite(n) && n >= 0 && n <= UINT32_MAX && std::floor(n) == n ? quint32(n) : 0;
+}
+qint64 telemetryAge(const QJsonObject &obj, const char *key) {
+    const auto value = obj.value(key);
+    const double n = value.toDouble(-1);
+    return value.isDouble() && std::isfinite(n) && n >= 0 && n < UINT32_MAX && std::floor(n) == n
+        ? qint64(n) : -1;
+}
+bool inRange(const QJsonObject &obj, const char *key, double low, double high) {
+    const auto value = obj.value(key);
+    return value.isDouble() && std::isfinite(value.toDouble()) && value.toDouble() >= low && value.toDouble() <= high;
+}
+quint32 boot32(const QString &text) {
+    const quint64 boot = text.toULongLong(nullptr, 16);
+    return quint32(boot) ? quint32(boot) : quint32(boot >> 32);
+}
+bool validNonce(const QString &text) {
+    bool ok = false;
+    const quint64 boot = text.toULongLong(&ok, 16);
+    return text.size() == 16 && ok && boot != 0;
+}
+bool freshReceipt(const QJsonObject &r) {
+    const auto age = r.value("execution_age_ms");
+    return r.value("execution_fresh").toBool() && age.isDouble() &&
+           age.toDouble() >= 0 && age.toDouble() <= 5000;
+}
+bool zeroOutputs(const QJsonObject &p) {
+    const auto motor = p.value("motor").toArray();
+    return p.value("valid").toBool() && p.value("armed").isBool() && !p.value("armed").toBool() &&
+           p.value("servo_enabled").isDouble() && p.value("servo_enabled").toInt(-1) == 0 &&
+           motor.size() == 2 && motor[0].isDouble() && motor[1].isDouble() &&
+           motor[0].toDouble() == 0 && motor[1].toDouble() == 0;
+}
+}
 
-GsClient::GsClient(QObject *parent)
-    : QObject(parent)
-    , m_nam(new QNetworkAccessManager(this))
-    , m_pollTimer(new QTimer(this))
-{
-    m_nam->setCookieJar(new QNetworkCookieJar(this));
-    connect(m_pollTimer, &QTimer::timeout, this, &GsClient::onPollTimer);
+QString executionText(const QString &state) {
+    if (state == "MODE_APPLIED") return "模式已生效";
+    if (state == "WAITING_IPC") return "等待执行条件";
+    if (state == "STARTING") return "零输出使能中";
+    if (state == "RUNNING") return "执行中";
+    if (state == "STOPPING") return "停止中";
+    if (state == "STOPPED") return "已停止";
+    if (state == "FAILED") return "执行中止";
+    if (state == "SUPERSEDED") return "已被新任务替代";
+    if (state == "IDLE") return "待机";
+    return "等待新鲜执行回报";
+}
+
+QString executionReasonText(const QString &reason) {
+    if (reason == "NONE" || reason.isEmpty()) return "无";
+    if (reason == "SENSOR_INVALID") return "所需方向、位置或航速无效/过期";
+    if (reason == "IPC_LOST") return "工控连接中断";
+    if (reason == "GS_PERMISSION_LOST") return "地面站执行许可失效";
+    if (reason == "CONTROLLER_NOT_CONFIGURED") return "控制器或舵向配置未就绪";
+    if (reason == "WAITING_TOPIC") return "等待工控对应输入/任务";
+    if (reason == "ACTUATOR_ERROR") return "执行器未完成应用或输出已关闭";
+    if (reason == "AUTHORITY_CHANGED") return "控制权已切换";
+    if (reason == "MODE_CHANGED") return "控制模式已切换";
+    if (reason == "USER_STOP") return "用户停止";
+    if (reason == "ROUTE_COMPLETE") return "航路点已完成";
+    if (reason == "NEWER_TASK") return "已有更新任务";
+    if (reason == "WAITING_FRESH_EXECUTION_REPORT") return "等待船端新鲜执行回报";
+    return reason;
+}
+
+GsClient::GsClient(QObject *parent) : QObject(parent), m_nam(this) {
+    m_clock.start();
+    m_nam.setCookieJar(new QNetworkCookieJar(&m_nam));
+    m_operationTimer.setInterval(500);
+    connect(&m_pollTimer, &QTimer::timeout, this, &GsClient::pollOverview);
+    connect(&m_operationTimer, &QTimer::timeout, this, &GsClient::queryOperation);
+}
+
+void GsClient::setBusy(bool busy) {
+    if (m_busy == busy) return;
+    m_busy = busy;
+    emit busyChanged(busy);
+}
+
+void GsClient::setAuthenticated(bool authenticated, const QString &message) {
+    m_authenticated = authenticated;
+    emit authStatusChanged(authenticated, message);
+}
+
+void GsClient::clearOperation() {
+    ++m_operationToken;
+    ++m_queryToken;
+    m_operationTimer.stop();
+    m_queryBusy = false;
+    m_operation = {};
+    setBusy(false);
+}
+
+void GsClient::invalidateTelemetry() {
+    m_latestTelemetry = {};
+    m_latestTelemetry.uid = m_selectedUid;
+    m_overviewAt = -10000;
+    emit telemetryUpdated(m_latestTelemetry);
+}
+
+void GsClient::resetContext(const QString &reason) {
+    ++m_context;
+    m_overviewBusy = false;
+    if (!m_operation.request.isEmpty()) emit missionResult(false, reason + "；此前操作结果须核对船端实际状态");
+    clearOperation();
+    invalidateTelemetry();
+    emit operationUpdated({});
 }
 
 void GsClient::setBaseUrl(const QString &url) {
-    m_baseUrl = url.trimmed();
-    while (m_baseUrl.endsWith('/')) {
-        m_baseUrl.chop(1);
-    }
-    if (!m_baseUrl.isEmpty() && !m_baseUrl.startsWith("http://") && !m_baseUrl.startsWith("https://")) {
-        m_baseUrl = "http://" + m_baseUrl;
-    }
+    QString normalized = url.trimmed();
+    while (normalized.endsWith('/')) normalized.chop(1);
+    if (!normalized.isEmpty() && !normalized.startsWith("http://") && !normalized.startsWith("https://"))
+        normalized.prepend("http://");
+    if (normalized == m_baseUrl) return;
+    resetContext("网关地址已改变");
+    m_baseUrl = normalized;
+    m_gsUid.clear();
+    m_members = {};
+    m_nam.setCookieJar(new QNetworkCookieJar(&m_nam));
+    setAuthenticated(false, "请连接并认证新网关");
+    emit fleetUpdated(m_members);
 }
 
-void GsClient::setPassword(const QString &pwd) {
-    m_password = pwd.trimmed();
+void GsClient::setPassword(const QString &password) {
+    if (m_password == password) return;
+    m_password = password;
+    setAuthenticated(false, "控制密码已改变，请重新连接认证");
 }
 
-void GsClient::login(std::function<void(bool ok, const QString &err)> callback) {
-    if (m_baseUrl.isEmpty()) {
-        if (callback) callback(false, "未配置网关地址");
-        return;
+void GsClient::setTargetUid(const QString &uid) {
+    if (uid == m_selectedUid) return;
+    resetContext("目标船只已改变");
+    m_selectedUid = uid;
+    updateTelemetry();
+}
+
+bool GsClient::canControl(bool requireMode) const {
+    const auto &t = m_latestTelemetry;
+    return m_authenticated && m_connected && m_clock.elapsed() - m_overviewAt <= 2500 &&
+           !m_gsUid.isEmpty() && !t.uid.isEmpty() && t.taskReady && validNonce(t.bootNonce) &&
+           (!requireMode || (t.fresh && t.controlFresh && t.controlRevision > 0 &&
+                            m_navigationAge + m_clock.elapsed() - m_overviewAt <= 5000));
+}
+
+bool GsClient::canPublish(int owner, int work) const {
+    return !m_busy && canControl() && m_latestTelemetry.controlOwner == owner &&
+           m_latestTelemetry.controlState == work;
+}
+
+QNetworkRequest GsClient::request(const QString &path, bool write) const {
+    QNetworkRequest req(QUrl(m_baseUrl + path));
+    req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    req.setTransferTimeout(2500);
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+    if (write) {
+        const QUrl url(m_baseUrl);
+        req.setRawHeader("Origin", (url.scheme() + "://" + url.authority()).toUtf8());
+        req.setRawHeader("X-GS-Write", "1");
     }
+    return req;
+}
 
-    QUrl url(m_baseUrl + "/api/v1/auth/login");
-    QNetworkRequest request(url);
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    request.setRawHeader("Origin", m_baseUrl.toUtf8());
-    request.setRawHeader("X-GS-Write", "1");
-
-    QJsonObject reqObj;
-    reqObj.insert("password", m_password);
-
-    QNetworkReply *reply = m_nam->post(request, QJsonDocument(reqObj).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, callback]() {
+void GsClient::login(std::function<void(bool, const QString &)> callback) {
+    const quint64 context = m_context;
+    const QString password = m_password;
+    auto *reply = m_nam.post(request("/api/v1/auth/login", true),
+                            QJsonDocument(QJsonObject{{"password", password}}).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, context, password, callback]() {
         reply->deleteLater();
-        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const QByteArray body = reply->readAll();
-
-        if (code == 200) {
-            m_authenticated = true;
-            // 提取 session Cookie 备用
-            for (const auto &hdr : reply->rawHeaderPairs()) {
-                if (hdr.first.toLower() == "set-cookie") {
-                    QString s = QString::fromUtf8(hdr.second);
-                    int idx = s.indexOf("session=");
-                    if (idx >= 0) {
-                        int end = s.indexOf(';', idx);
-                        if (end < 0) end = s.length();
-                        m_sessionCookie = s.mid(idx, end - idx).trimmed();
-                    }
-                }
-            }
-            emit authStatusChanged(true, "安全认证成功");
-            if (callback) callback(true, "");
-        } else {
-            m_authenticated = false;
-            m_sessionCookie.clear();
-            QString err = QString("HTTP %1 %2").arg(code).arg(QString::fromUtf8(body));
-            emit authStatusChanged(false, err);
-            if (callback) callback(false, err);
-        }
+        if (context != m_context || password != m_password) return;
+        const bool ok = reply->error() == QNetworkReply::NoError &&
+                        reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200;
+        const QString message = ok ? "安全认证成功" : "认证失败，请检查地址与密码：" + reply->errorString();
+        setAuthenticated(ok, message);
+        if (callback) callback(ok, message);
     });
 }
 
 void GsClient::startPolling(int intervalMs) {
-    m_pollTimer->start(intervalMs);
-    onPollTimer(); // 立即触发一次
+    m_pollTimer.start(qMax(100, intervalMs));
+    pollOverview();
 }
 
 void GsClient::stopPolling() {
-    m_pollTimer->stop();
+    const bool wasConnected = m_connected, wasAuthenticated = m_authenticated;
+    m_pollTimer.stop();
+    resetContext("已断开网关");
+    m_connected = false;
+    m_authenticated = false;
+    if (wasAuthenticated) emit authStatusChanged(false, "已断开");
+    if (wasConnected) emit connectionStatusChanged(false);
 }
 
-QString GsClient::generateOperationId() {
-    return QUuid::createUuid().toString(QUuid::WithoutBraces).remove('-').toLower();
-}
-
-void GsClient::onPollTimer() {
-    QUrl url(m_baseUrl + "/api/v1/fleet/overview");
-    QNetworkRequest request(url);
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-
-    QNetworkReply *reply = m_nam->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        onOverviewReply(reply);
-    });
-}
-
-void GsClient::onOverviewReply(QNetworkReply *reply) {
-    reply->deleteLater();
-    if (reply->error() != QNetworkReply::NoError) {
-        if (m_connected) {
-            m_connected = false;
-            emit connectionStatusChanged(false);
-        }
-        return;
-    }
-
-    if (!m_connected) {
-        m_connected = true;
-        emit connectionStatusChanged(true);
-    }
-
-    const QByteArray data = reply->readAll();
-    QJsonParseError err;
-    const QJsonDocument doc = QJsonDocument::fromJson(data, &err);
-    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
-        return;
-    }
-
-    const QJsonObject root = doc.object();
-    const QJsonArray members = root.value("members").toArray();
-    if (members.isEmpty()) {
-        return;
-    }
-
-    // 筛选目标船只：严谨筛选 task_ready 为真且 bootNonce 有效且非全零的船只
-    QJsonObject targetMember;
-    for (const auto &val : members) {
-        const QJsonObject m = val.toObject();
-        const QString nonce = m.value("task_rp_boot_nonce").toString();
-        const bool taskReady = m.value("task_ready").toBool();
-        const bool online = m.value("device_online").toBool();
-        if (taskReady && !nonce.isEmpty() && nonce != "0000000000000000") {
-            targetMember = m;
-            if (online) {
-                break; // 优先选取在线且就绪的船只
-            }
-        }
-    }
-    if (targetMember.isEmpty()) {
-        targetMember = members.first().toObject();
-    }
-
-    m_latestTelemetry.uid = targetMember.value("uid").toString();
-    m_latestTelemetry.bootNonce = targetMember.value("task_rp_boot_nonce").toString();
-    m_latestTelemetry.taskReady = targetMember.value("task_ready").toBool();
-    m_latestTelemetry.deviceOnline = targetMember.value("device_online").toBool();
-    m_latestTelemetry.loraState = targetMember.value("lora_state").toString();
-
-    const QJsonObject nav = targetMember.value("navigation").toObject();
-    m_latestTelemetry.available = nav.value("available").toBool();
-    m_latestTelemetry.fresh = nav.value("fresh").toBool();
-    m_latestTelemetry.positionValid = nav.value("position_valid").toBool();
-    m_latestTelemetry.latDeg = nav.value("lat_deg").toDouble();
-    m_latestTelemetry.lonDeg = nav.value("lon_deg").toDouble();
-    m_latestTelemetry.headingDeg = nav.value("heading_deg").toDouble();
-    m_latestTelemetry.headingValid = nav.value("heading_valid").toBool();
-    m_latestTelemetry.sogMps = nav.value("sog_mps").toDouble();
-    m_latestTelemetry.cogDeg = nav.value("cog_deg").toDouble();
-    m_latestTelemetry.rtkState = nav.value("rtk_state").toInt();
-    m_latestTelemetry.satellites = nav.value("satellites").toInt();
-    m_latestTelemetry.batteryV = nav.value("battery_v").toDouble();
-    m_latestTelemetry.positionSource = nav.value("position_source").toString();
-
-    const QJsonObject ctrl = nav.value("control_mode").toObject();
-    m_latestTelemetry.controlOwner = ctrl.value("owner_code").toInt();
-    m_latestTelemetry.controlState = ctrl.value("state_code").toInt();
-    m_latestTelemetry.controlRevision = ctrl.value("revision").toVariant().toUInt();
-    m_latestTelemetry.controlOwnerStr = ctrl.value("owner").toString("UNKNOWN");
-    m_latestTelemetry.controlStateStr = ctrl.value("work_state").toString("UNKNOWN");
-    m_latestTelemetry.controlPhase = ctrl.value("phase").toString("UNKNOWN");
-    m_latestTelemetry.controlReason = ctrl.value("reason").toString("UNKNOWN");
-
-    emit telemetryUpdated(m_latestTelemetry);
-}
-
-void GsClient::trackOperation(const QString &operationId,
-                              int timeoutMs,
-                              std::function<void(const QJsonObject &obj, bool &done)> onUpdate,
-                              std::function<void(const QString &err)> onTimeout)
-{
-    auto timer = new QTimer(this);
-    auto elapsed = std::make_shared<int>(0);
-
-    connect(timer, &QTimer::timeout, this, [this, timer, elapsed, operationId, timeoutMs, onUpdate, onTimeout]() {
-        *elapsed += 300;
-        if (*elapsed >= timeoutMs) {
-            timer->stop();
-            timer->deleteLater();
-            if (onTimeout) onTimeout("等待船端响应超时");
-            return;
-        }
-
-        QUrl url(m_baseUrl + "/api/v1/missions/" + operationId);
-        QNetworkRequest req(url);
-        req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-
-        QNetworkReply *reply = m_nam->get(req);
-        connect(reply, &QNetworkReply::finished, this, [reply, timer, onUpdate]() {
-            reply->deleteLater();
-            if (reply->error() != QNetworkReply::NoError) {
-                return;
-            }
-            QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
-            if (!doc.isObject()) return;
-
-            bool done = false;
-            onUpdate(doc.object(), done);
-            if (done) {
-                timer->stop();
-                timer->deleteLater();
-            }
-        });
-    });
-
-    timer->start(300);
-}
-
-void GsClient::switchControlMode(int owner, int state, std::function<void(bool ok, const QString &msg)> callback) {
-    const QString opId = generateOperationId();
-    QJsonObject req;
-    req.insert("operation_id", opId);
-    req.insert("uid", m_latestTelemetry.uid);
-    req.insert("expected_rp_boot_nonce", m_latestTelemetry.bootNonce);
-    req.insert("kind", "control_mode");
-    req.insert("mode_owner", owner);
-    req.insert("mode_state", state);
-    req.insert("expected_control_revision", double(m_latestTelemetry.controlRevision));
-
-    QUrl url(m_baseUrl + "/api/v1/missions/submit");
-    QNetworkRequest request(url);
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    request.setRawHeader("Origin", m_baseUrl.toUtf8());
-    request.setRawHeader("X-GS-Write", "1");
-    if (!m_sessionCookie.isEmpty()) {
-        request.setRawHeader("Cookie", m_sessionCookie.toUtf8());
-    }
-
-    QNetworkReply *reply = m_nam->post(request, QJsonDocument(req).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, opId, callback]() {
+void GsClient::pollOverview() {
+    // Expire locally even when a stalled HTTP request has not finished yet.
+    if (m_clock.elapsed() - m_overviewAt > 2500 && m_latestTelemetry.fresh) invalidateTelemetry();
+    if (m_overviewBusy) return;
+    m_overviewBusy = true;
+    const quint64 context = m_context;
+    auto *reply = m_nam.get(request("/api/v1/fleet/overview"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, context]() {
         reply->deleteLater();
-        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const QByteArray body = reply->readAll();
-
-        if (code != 200 && code != 202) {
-            if (callback) callback(false, QString("网关拒绝模式切换请求: HTTP %1 %2").arg(code).arg(QString::fromUtf8(body)));
+        if (context != m_context) return;
+        m_overviewBusy = false;
+        QJsonParseError error;
+        const auto doc = QJsonDocument::fromJson(reply->readAll(), &error);
+        const auto root = doc.object();
+        if (reply->error() != QNetworkReply::NoError || error.error != QJsonParseError::NoError ||
+            !root.value("members").isArray() || root.value("gs_uid").toString().isEmpty()) {
+            invalidateTelemetry();
+            if (m_connected) { m_connected = false; emit connectionStatusChanged(false); }
             return;
         }
-
-        emit missionProgress("网关已受理模式切换请求 (202 Accepted)，正在等待船端执行确认 (MODE_APPLIED)...");
-
-        trackOperation(opId, 8000, [this, callback](const QJsonObject &obj, bool &done) {
-            const QString stage = obj.value("stage").toString();
-            const QString status = obj.value("status").toString();
-            const QString reason = obj.value("reason").toString();
-            const QString execState = obj.value("execution_state").toString();
-
-            if (execState == "MODE_APPLIED" || (stage == "RP_RECEIVED" && status == "OK")) {
-                done = true;
-                if (callback) callback(true, "MODE_APPLIED");
-                return;
+        const QString gsUid = root.value("gs_uid").toString();
+        if (!m_gsUid.isEmpty() && gsUid != m_gsUid) {
+            resetContext("网关身份已改变");
+            setAuthenticated(false, "网关身份已改变，请重新连接认证");
+            m_nam.setCookieJar(new QNetworkCookieJar(&m_nam));
+        }
+        m_gsUid = gsUid;
+        m_members = root.value("members").toArray();
+        m_overviewAt = m_clock.elapsed();
+        if (!m_connected) { m_connected = true; emit connectionStatusChanged(true); }
+        // Pick once; disappearance of a selected vessel must never retarget a command.
+        if (m_selectedUid.isEmpty() && !m_members.isEmpty()) {
+            m_selectedUid = m_members.first().toObject().value("uid").toString();
+            for (const auto &member : m_members) if (member.toObject().value("task_ready").toBool()) {
+                m_selectedUid = member.toObject().value("uid").toString(); break;
             }
-            if (stage == "REJECTED" || status == "BUSY" || status == "CONFLICT") {
-                done = true;
-                if (callback) callback(false, QString("船端拒绝模式切换 [status: %1, reason: %2]").arg(status, reason));
-                return;
-            }
-            if (stage == "TIMED_OUT") {
-                done = true;
-                if (callback) callback(false, "模式切换请求在无线链路超时 (未收到船端 ACK)");
-                return;
-            }
-        }, [callback](const QString &err) {
-            if (callback) callback(false, err);
-        });
+        }
+        updateTelemetry();
+        emit fleetUpdated(m_members);
     });
 }
 
-void GsClient::submitWaypoints(const QVector<Waypoint> &waypoints, int ttlSeconds) {
-    if (waypoints.isEmpty()) {
-        emit missionResult(false, "航点列表为空");
-        return;
+void GsClient::updateTelemetry() {
+    QJsonObject member;
+    for (const auto &value : m_members) if (value.toObject().value("uid").toString() == m_selectedUid) {
+        member = value.toObject(); break;
     }
-    if (waypoints.size() > 16) {
-        emit missionResult(false, "单次任务最多支持 16 个航点");
-        return;
-    }
-    if (m_latestTelemetry.uid.isEmpty() || !m_latestTelemetry.taskReady ||
-        m_latestTelemetry.bootNonce.isEmpty() || m_latestTelemetry.bootNonce == "0000000000000000") {
-        emit missionResult(false, "目标船只尚未就绪 (task_ready 为假或 boot_nonce 全零，船端未接入 LoRa 任务链路)");
-        return;
-    }
-
-    if (!m_authenticated) {
-        login([this, waypoints, ttlSeconds](bool ok, const QString &err) {
-            if (!ok) {
-                emit missionResult(false, "网关安全认证失败: " + err);
-                return;
-            }
-            submitWaypoints(waypoints, ttlSeconds);
-        });
-        return;
-    }
-
-    // 检查船端控制模式是否为 MAIN/WAYPOINTS (owner=1, state=3)
-    if (m_latestTelemetry.controlOwner == 1 && m_latestTelemetry.controlState == 3) {
-        emit missionProgress("船端当前已处于 [MAIN/WAYPOINTS] 循迹模式，开始发布航点...");
-        doSubmitWaypoints(waypoints, ttlSeconds, false);
-    } else {
-        emit missionProgress(QString("船端当前模式为 [%1/%2]，正在申请切换为 [MAIN/WAYPOINTS 循迹模式]...")
-            .arg(m_latestTelemetry.controlOwnerStr, m_latestTelemetry.controlStateStr));
-
-        switchControlMode(1, 3, [this, waypoints, ttlSeconds](bool ok, const QString &msg) {
-            if (!ok) {
-                emit missionResult(false, "模式切换被拒绝: " + msg);
-                return;
-            }
-            emit missionProgress("模式切换已在船端生效 (MODE_APPLIED)！正在下发航点...");
-            doSubmitWaypoints(waypoints, ttlSeconds, false);
-        });
-    }
+    const auto nav = member.value("navigation").toObject();
+    const auto mode = nav.value("control_mode").toObject();
+    const auto task = nav.value("ipc_task").toObject();
+    const QString boot = member.value("task_rp_boot_nonce").toString();
+    if (!m_operation.request.isEmpty() && validNonce(boot) &&
+        boot != m_operation.request.value("expected_rp_boot_nonce").toString())
+        finishOperation(false, "船端已重启，旧操作失效；请核对模式后重新发布新任务");
+    UsvTelemetry t;
+    const auto age = nav.value("age_ms");
+    m_navigationAge = age.isDouble() && age.toDouble() >= 0 && age.toDouble() <= 5000 ? qint64(age.toDouble()) : 5001;
+    t.uid = m_selectedUid; t.bootNonce = boot;
+    t.taskReady = member.value("task_ready").toBool() && member.value("state").toString() == "JOINED";
+    t.deviceOnline = member.value("device_online").toBool();
+    t.loraState = member.value("lora_state").toString();
+    t.available = nav.value("available").toBool();
+    t.fresh = nav.value("fresh").toBool() && m_clock.elapsed() - m_overviewAt <= 2500 &&
+              m_navigationAge + m_clock.elapsed() - m_overviewAt <= 5000;
+    // Position and direction have separate source ages; loss of position must
+    // not invalidate a fresh compass/control direction or the task receipt.
+    const qint64 cachedMs = qMax<qint64>(0, m_clock.elapsed() - m_overviewAt);
+    t.navAgeMs = telemetryAge(nav, "nav_age_ms");
+    t.headingAgeMs = telemetryAge(nav, "heading_age_ms");
+    if (t.navAgeMs >= 0) t.navAgeMs += cachedMs;
+    if (t.headingAgeMs >= 0) t.headingAgeMs += cachedMs;
+    const bool navFresh = t.fresh && (!nav.contains("nav_age_ms") || (t.navAgeMs >= 0 && t.navAgeMs <= 5000));
+    t.positionValid = navFresh && nav.value("position_valid").toBool() &&
+                      inRange(nav, "lat_deg", -90, 90) && inRange(nav, "lon_deg", -180, 180);
+    t.latDeg = nav.value("lat_deg").toDouble(); t.lonDeg = nav.value("lon_deg").toDouble();
+    t.headingValid = t.fresh && nav.value("heading_valid").toBool() &&
+                     inRange(nav, "heading_deg", 0, 360) && nav.value("heading_deg").toDouble() < 360 &&
+                     (!nav.contains("heading_age_ms") || (t.headingAgeMs >= 0 && t.headingAgeMs <= 3000));
+    t.headingDeg = nav.value("heading_deg").toDouble();
+    t.headingSource = nav.value("heading_source").toString();
+    t.headingReference = nav.value("heading_reference").toString();
+    t.headingReason = nav.value("heading_reason").toString();
+    t.speedValid = navFresh && inRange(nav, "sog_mps", 0, 655.34);
+    t.cogValid = navFresh && inRange(nav, "cog_deg", 0, 360) && nav.value("cog_deg").toDouble() < 360;
+    t.sogMps = nav.value("sog_mps").toDouble(); t.cogDeg = nav.value("cog_deg").toDouble();
+    const auto rtk = nav.value("rtk_state");
+    const double rtkCode = rtk.toDouble(-1);
+    t.rtkState = t.fresh && rtk.isDouble() && rtkCode >= 0 && rtkCode <= 3 && std::floor(rtkCode) == rtkCode
+        ? int(rtkCode) : 0;
+    t.satellites = nav.value("satellites").toInt();
+    t.batteryValid = t.fresh && nav.value("battery_v").isDouble();
+    t.batteryV = nav.value("battery_v").toDouble();
+    t.positionSource = nav.value("position_source").toString();
+    t.driftMs = telemetryAge(nav, "drift_ms");
+    t.diffAgeState = nav.value("diff_age_state").toString();
+    t.diffAgeMs = telemetryAge(nav, "diff_age_ms");
+    if (!t.fresh || t.diffAgeState != "VALID" || t.diffAgeMs > 3000) t.diffAgeMs = -1;
+    t.controlFresh = t.fresh && mode.value("fresh").toBool();
+    t.controlOwner = mode.value("owner_code").toInt(); t.controlState = mode.value("state_code").toInt();
+    t.controlRevision = number(mode, "revision");
+    t.modeGsBoot = number(mode, "gs_boot"); t.modeCommandId = number(mode, "command_id");
+    t.controlOwnerStr = mode.value("owner").toString("UNKNOWN");
+    t.controlStateStr = mode.value("work_state").toString("UNKNOWN");
+    t.controlPhase = mode.value("phase").toString("UNKNOWN");
+    t.controlReason = mode.value("reason").toString("UNKNOWN");
+    t.waypointIndex = mode.value("waypoint_index").toInt(); t.waypointCount = mode.value("waypoint_count").toInt();
+    t.taskFresh = t.fresh && task.value("fresh").toBool();
+    t.taskGsBoot = number(task, "gs_boot"); t.taskCommandId = number(task, "command_id");
+    t.taskPhase = task.value("state").toString("UNKNOWN");
+    t.taskReason = task.value("reason").toString("UNKNOWN");
+    t.outputsOff = t.fresh && zeroOutputs(nav.value("power").toObject());
+    m_latestTelemetry = t;
+    emit telemetryUpdated(t);
+    if (m_operation.posted && m_operationTimer.isActive()) evaluateOperation();
 }
 
-void GsClient::doSubmitWaypoints(const QVector<Waypoint> &waypoints, int ttlSeconds, bool isRetry) {
-    const QString opId = generateOperationId();
-    QJsonObject req;
-    req.insert("operation_id", opId);
-    req.insert("uid", m_latestTelemetry.uid);
-    req.insert("expected_rp_boot_nonce", m_latestTelemetry.bootNonce);
-    req.insert("kind", "waypoints");
-    req.insert("ttl_s", ttlSeconds);
-
-    QJsonArray pointsArray;
-    for (const auto &wp : waypoints) {
-        QJsonObject pt;
-        pt.insert("lat_deg", wp.latDeg);
-        pt.insert("lon_deg", wp.lonDeg);
-        pt.insert("speed_mps", wp.speedMps);
-        pointsArray.append(pt);
+QJsonObject GsClient::taskRequest(const QString &kind, int owner, int work) {
+    if (!canPublish(owner, work)) {
+        emit missionResult(false, "请先连接认证，并应用所选主控/工控工作模式，等待船端新鲜确认");
+        return {};
     }
-    req.insert("points", pointsArray);
+    return {{"kind", kind}};
+}
 
-    QUrl url(m_baseUrl + "/api/v1/missions/submit");
-    QNetworkRequest request(url);
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    request.setRawHeader("Origin", m_baseUrl.toUtf8());
-    request.setRawHeader("X-GS-Write", "1");
-    if (!m_sessionCookie.isEmpty()) {
-        request.setRawHeader("Cookie", m_sessionCookie.toUtf8());
+void GsClient::switchControlMode(int owner, int work, std::function<void(bool, const QString &)> callback) {
+    if (m_busy || !canControl() || owner < 1 || owner > 2 || work < 1 || work > 3 ||
+        m_latestTelemetry.controlRevision == UINT32_MAX) {
+        const QString message = "模式切换条件未满足，请等待认证、新鲜模式或上次操作结束";
+        emit missionResult(false, message);
+        if (callback) callback(false, message);
+        return;
     }
+    beginOperation({{"kind", "control_mode"}, {"mode_owner", owner}, {"mode_state", work},
+                    {"expected_control_revision", double(m_latestTelemetry.controlRevision)}}, callback);
+}
 
-    QNetworkReply *reply = m_nam->post(request, QJsonDocument(req).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, waypoints, ttlSeconds, isRetry, opId]() {
-        reply->deleteLater();
-        const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const QByteArray body = reply->readAll();
-
-        if (code == 401 && !isRetry) {
-            m_authenticated = false;
-            m_sessionCookie.clear();
-            login([this, waypoints, ttlSeconds](bool ok, const QString &err) {
-                if (ok) {
-                    doSubmitWaypoints(waypoints, ttlSeconds, true);
-                } else {
-                    emit missionResult(false, QString("网关会话失效且重新认证失败: %1").arg(err));
-                }
-            });
-            return;
+void GsClient::submitWaypoints(const QVector<Waypoint> &points, int ttlSeconds, int owner) {
+    if (points.isEmpty() || points.size() > 16 || ttlSeconds < 1 || ttlSeconds > 3600) {
+        emit missionResult(false, "需要1～16个航点，有效期1～3600秒"); return;
+    }
+    QJsonArray array;
+    for (const auto &wp : points) {
+        if (!std::isfinite(wp.latDeg) || !std::isfinite(wp.lonDeg) || !std::isfinite(wp.speedMps) ||
+            std::abs(wp.latDeg) > 90 || std::abs(wp.lonDeg) > 180 || wp.speedMps < 0 || wp.speedMps > 3) {
+            emit missionResult(false, "航点坐标或速度无效，速度必须为0～3 m/s"); return;
         }
+        array.append(QJsonObject{{"lat_deg", wp.latDeg}, {"lon_deg", wp.lonDeg}, {"speed_mps", wp.speedMps}});
+    }
+    auto req = taskRequest("waypoints", owner, 3);
+    if (req.isEmpty()) return;
+    req.insert("points", array); req.insert("ttl_s", ttlSeconds);
+    beginOperation(req);
+}
 
-        if (code != 200 && code != 202) {
-            emit missionResult(false, QString("任务发布被网关拒绝: HTTP %1 %2").arg(code).arg(QString::fromUtf8(body)));
-            return;
-        }
+void GsClient::submitHeadingSpeed(int owner, double headingDeg, double speedMps) {
+    if (!std::isfinite(headingDeg) || headingDeg < 0 || headingDeg >= 360 ||
+        !std::isfinite(speedMps) || speedMps < 0 || speedMps > 3) {
+        emit missionResult(false, "航向须在[0,360)°，航速须在0～3 m/s"); return;
+    }
+    auto req = taskRequest("ipc_heading_speed", owner, 2);
+    if (req.isEmpty()) return;
+    req.insert("heading_deg", headingDeg); req.insert("speed_mps", speedMps);
+    beginOperation(req);
+}
 
-        emit missionProgress("网关已受理航点 (202 Accepted)，正在等待船端 LoRa 确认接收...");
-
-        // 持续轮询 /api/v1/missions/{operation_id} 跟踪真实船端执行回执
-        trackOperation(opId, 12000, [this](const QJsonObject &obj, bool &done) {
-            const QString stage = obj.value("stage").toString();
-            const QString status = obj.value("status").toString();
-            const QString reason = obj.value("reason").toString();
-            const QString execState = obj.value("execution_state").toString();
-            const QString execReason = obj.value("execution_reason").toString();
-
-            if (stage == "RP_RECEIVED") {
-                if (status == "OK") {
-                    const QString sUpper = execState.toUpper();
-                    const QString rUpper = execReason.toUpper();
-
-                    if (sUpper == "RUNNING" || sUpper == "RUN") {
-                        done = true;
-                        emit missionResult(true, "航点已在船端生效，动力系统已启动循迹！");
-                        return;
-                    }
-                    if (sUpper == "STARTING") {
-                        done = true;
-                        emit missionResult(true, "航点已在船端生效，零输出使能中 (STARTING)...");
-                        return;
-                    }
-                    if (sUpper == "WAITING_IPC" || sUpper == "WAITING" || sUpper == "IDLE" || sUpper.isEmpty()) {
-                        done = true;
-                        QString msg = "航点已成功被船端接收 (LoRa ACK确认)！当前状态: 等待执行条件 (WAITING_IPC)。";
-                        if (qFuzzyIsNull(m_latestTelemetry.latDeg) && qFuzzyIsNull(m_latestTelemetry.lonDeg)) {
-                            msg += "\n提示: 船端当前经纬度为 0.000000, 0.000000 (GNSS 尚未完成有效水面定位锁定)。船端主控保护机制已启动，一旦获取有效 RTK/GNSS 位置与航向，即可自动起航！";
-                        } else {
-                            msg += "\n提示: 船端正在等待传感器反馈就绪 (需要有效航向、航速及 RTK 定位)，满足条件后自动起航。";
-                        }
-                        emit missionResult(true, msg);
-                        return;
-                    }
-                    if (sUpper == "SENSOR_INVALID" || sUpper == "SENSORINVALID" || rUpper == "SENSOR_INVALID") {
-                        done = true;
-                        emit missionResult(false, "船端接收航点但无法执行: 传感器数据无效或过期 (缺少新鲜航向/RTK定位/航速)");
-                        return;
-                    }
-                    if (sUpper == "STOPPING" || sUpper == "STOPPED" || rUpper == "USER_STOP" || rUpper == "USERSTOP") {
-                        done = true;
-                        emit missionResult(false, "船端任务已被急停打断");
-                        return;
-                    }
-                    done = true;
-                    emit missionResult(true, QString("航点已成功被船端接收 (LoRa ACK确认)！当前执行状态: %1").arg(execState));
-                    return;
-                } else {
-                    done = true;
-                    emit missionResult(false, QString("船端拒绝执行航点: status=%1, reason=%2").arg(status, reason));
-                    return;
-                }
-            } else if (stage == "REJECTED") {
-                done = true;
-                emit missionResult(false, QString("任务被船端拒绝: status=%1, reason=%2").arg(status, reason));
-                return;
-            } else if (stage == "TIMED_OUT") {
-                done = true;
-                emit missionResult(false, "任务发布超时: 未在时限内收到船端 LoRa ACK 回执");
-                return;
-            } else if (stage == "CANCELLED") {
-                done = true;
-                emit missionResult(false, "任务已被取消或被覆盖");
-                return;
-            } else {
-                emit missionProgress(QString("任务正在传输中 (网关阶段: %1)...").arg(stage));
-            }
-        }, [this](const QString &err) {
-            emit missionResult(false, "任务执行跟踪超时: " + err);
-        });
-    });
+void GsClient::submitHeadingOnly(int owner, double headingDeg, double throttlePercent) {
+    if (!std::isfinite(headingDeg) || headingDeg < 0 || headingDeg >= 360 ||
+        !std::isfinite(throttlePercent) || throttlePercent < 0 || throttlePercent > 100) {
+        emit missionResult(false, "航向须在[0,360)°，固定推进须在0～100%（0%仍控舵）"); return;
+    }
+    auto req = taskRequest("heading_only", owner, 2);
+    if (req.isEmpty()) return;
+    req.insert("heading_deg", headingDeg); req.insert("throttle_percent", throttlePercent);
+    beginOperation(req);
 }
 
 void GsClient::submitEmergencyStop() {
-    if (m_latestTelemetry.uid.isEmpty() || !m_latestTelemetry.taskReady ||
-        m_latestTelemetry.bootNonce.isEmpty() || m_latestTelemetry.bootNonce == "0000000000000000") {
-        emit missionResult(false, "尚未检测到在线就绪船只");
-        return;
-    }
-
-    if (!m_authenticated) {
-        login([this](bool ok, const QString &err) {
-            if (!ok) {
-                emit missionResult(false, "急停发送被拒绝: 网关安全认证失败 (" + err + ")");
-                return;
-            }
-            submitEmergencyStop();
-        });
-        return;
-    }
-
-    doSubmitEmergencyStop(false);
+    // STOP preempts local submission/mode tracking and does not require a fresh mode.
+    if (!canControl(false)) { emit missionResult(false, "无法发送停船：等待目标船LoRa身份和网关认证"); return; }
+    beginOperation({{"kind", "stop"}});
 }
 
-void GsClient::doSubmitEmergencyStop(bool isRetry) {
-    const QString opId = generateOperationId();
-    QJsonObject req;
-    req.insert("operation_id", opId);
+void GsClient::beginOperation(QJsonObject req, std::function<void(bool, const QString &)> callback) {
+    clearOperation();
+    req.insert("operation_id", QUuid::createUuid().toString(QUuid::WithoutBraces).remove('-').toLower());
     req.insert("uid", m_latestTelemetry.uid);
     req.insert("expected_rp_boot_nonce", m_latestTelemetry.bootNonce);
-    req.insert("kind", "stop");
-
-    QUrl url(m_baseUrl + "/api/v1/missions/submit");
-    QNetworkRequest request(url);
-    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
-    request.setRawHeader("Origin", m_baseUrl.toUtf8());
-    request.setRawHeader("X-GS-Write", "1");
-    if (!m_sessionCookie.isEmpty()) {
-        request.setRawHeader("Cookie", m_sessionCookie.toUtf8());
-    }
-
-    QNetworkReply *reply = m_nam->post(request, QJsonDocument(req).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, isRetry, opId]() {
+    m_operation.request = req; m_operation.gsUid = m_gsUid;
+    m_operation.startedAt = m_operation.lastFreshAt = m_clock.elapsed();
+    m_operation.modeCallback = callback;
+    setBusy(true);
+    const quint64 context = m_context, token = m_operationToken;
+    operationNotice("正在提交；等待网关受理及船端实际回报");
+    auto *reply = m_nam.post(request("/api/v1/missions/submit", true), QJsonDocument(req).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, context, token]() {
         reply->deleteLater();
+        if (context != m_context || token != m_operationToken) return;
         const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const QByteArray body = reply->readAll();
-
-        if (code == 401 && !isRetry) {
-            m_authenticated = false;
-            m_sessionCookie.clear();
-            login([this](bool ok, const QString &err) {
-                if (ok) {
-                    doSubmitEmergencyStop(true);
-                } else {
-                    emit missionResult(false, QString("网关会话失效且重新认证失败: %1").arg(err));
-                }
-            });
-            return;
+        const auto body = reply->readAll();
+        m_operation.posted = true;
+        if (code >= 400 && code < 500) {
+            if (code == 401) setAuthenticated(false, "控制会话失效，请重新连接认证");
+            finishOperation(false, QString("网关拒绝：HTTP %1 %2").arg(code).arg(QString::fromUtf8(body))); return;
         }
-
-        if (code != 200 && code != 202) {
-            emit missionResult(false, QString("紧急停船被网关拒绝: HTTP %1 %2").arg(code).arg(QString::fromUtf8(body)));
-            return;
+        if ((code == 200 || code == 202) && reply->error() == QNetworkReply::NoError &&
+            acceptReceipt(QJsonDocument::fromJson(body).object())) evaluateOperation();
+        else {
+            if (m_operation.queryError.isEmpty()) m_operation.queryError = "提交结果未确认，正在查询原操作编号；不会自动重发";
+            evaluateOperation();
         }
-
-        emit missionProgress("网关已受理急停指令 (202 Accepted)，正在等待船端停机确认...");
-
-        trackOperation(opId, 8000, [this](const QJsonObject &obj, bool &done) {
-            const QString stage = obj.value("stage").toString();
-            const QString status = obj.value("status").toString();
-            const QString execState = obj.value("execution_state").toString();
-
-            const QString sUpper = execState.toUpper();
-            if (stage == "RP_RECEIVED" || sUpper == "STOPPING" || sUpper == "STOPPED" || sUpper == "USERSTOP" || sUpper == "USER_STOP") {
-                done = true;
-                emit missionResult(true, "紧急停船已在物理船端生效停机！");
-                return;
-            }
-            if (stage == "REJECTED") {
-                done = true;
-                emit missionResult(false, "急停指令被船端拒绝: " + status);
-                return;
-            }
-            if (stage == "TIMED_OUT") {
-                done = true;
-                emit missionResult(false, "急停指令超时: 未收到船端 LoRa ACK");
-                return;
-            }
-        }, [this](const QString &err) {
-            emit missionResult(false, "急停跟踪超时: " + err);
-        });
+        if (token == m_operationToken && !m_operation.request.isEmpty()) m_operationTimer.start();
     });
+}
+
+bool GsClient::acceptReceipt(const QJsonObject &r) {
+    const auto &req = m_operation.request;
+    if (req.isEmpty() || m_operation.gsUid != m_gsUid || r.value("operation_id") != req.value("operation_id") ||
+        r.value("uid") != req.value("uid") || r.value("kind") != req.value("kind") ||
+        number(r, "expected_rp_boot") != boot32(req.value("expected_rp_boot_nonce").toString()) ||
+        (r.value("stage").toString() == "RP_RECEIVED" && number(r, "actual_rp_boot") != number(r, "expected_rp_boot")) ||
+        !number(r, "command_id") || !number(r, "gs_boot") ||
+        (m_operation.commandId && m_operation.commandId != number(r, "command_id")) ||
+        (m_operation.gsBoot && m_operation.gsBoot != number(r, "gs_boot"))) {
+        m_operation.queryError = "回执身份不匹配或格式无效，执行结果未确认"; return false;
+    }
+    m_operation.commandId = number(r, "command_id"); m_operation.gsBoot = number(r, "gs_boot");
+    m_operation.receipt = r;
+    m_operation.queryError.clear();
+    if (freshReceipt(r)) {
+        m_operation.lastFreshAt = m_clock.elapsed();
+        m_operation.receivedExecution = true;
+    }
+    return true;
+}
+
+void GsClient::queryOperation() {
+    if (m_operation.request.isEmpty() || !m_operation.posted) return;
+    const qint64 now = m_clock.elapsed();
+    const QString kind = m_operation.request.value("kind").toString();
+    const bool needsApplication = kind == "control_mode" || kind == "stop";
+    if (m_operationTimer.isActive() && !m_operation.notifiedUnknown &&
+        ((needsApplication && now - m_operation.startedAt >= 20000) || now - m_operation.lastFreshAt >= 20000)) {
+        m_operation.notifiedUnknown = true;
+        m_operationTimer.stop();
+        ++m_queryToken;
+        m_queryBusy = false;
+        setBusy(false);
+        const QString message = "确认超时，执行结果未知；自动跟踪已停止，可手动刷新原操作回执。不会重新发布";
+        operationNotice(message);
+        emit missionResult(false, message);
+        if (m_operation.modeCallback) {
+            auto callback = std::move(m_operation.modeCallback); m_operation.modeCallback = {};
+            callback(false, message);
+        }
+        return;
+    }
+    if (m_queryBusy) return;
+    m_queryBusy = true;
+    const quint64 context = m_context, token = m_operationToken, queryToken = ++m_queryToken;
+    auto *reply = m_nam.get(request("/api/v1/missions/" + m_operation.request.value("operation_id").toString()));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, context, token, queryToken]() {
+        reply->deleteLater();
+        if (context != m_context || token != m_operationToken || queryToken != m_queryToken) return;
+        m_queryBusy = false;
+        if (reply->error() == QNetworkReply::NoError)
+            acceptReceipt(QJsonDocument::fromJson(reply->readAll()).object());
+        else {
+            const int code = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            m_operation.queryError = QString("回执查询未成功：HTTP %1 / %2；不会重新发布").arg(code).arg(reply->errorString());
+        }
+        evaluateOperation();
+    });
+}
+
+void GsClient::operationNotice(const QString &message) {
+    m_operation.lastMessage = message;
+    auto display = m_operation.receipt;
+    display.insert("execution_fresh", executionFresh());
+    display.insert("operation_id", m_operation.request.value("operation_id"));
+    display.insert("uid", m_operation.request.value("uid"));
+    display.insert("kind", m_operation.request.value("kind"));
+    display.insert("message", message);
+    const auto &t = m_latestTelemetry;
+    if (t.controlFresh && t.taskFresh && t.taskCommandId == m_operation.commandId &&
+        t.taskGsBoot == m_operation.gsBoot && t.uid == m_operation.request.value("uid").toString() &&
+        t.bootNonce == m_operation.request.value("expected_rp_boot_nonce").toString()) {
+        display.insert("waypoint_index", t.waypointIndex);
+        display.insert("waypoint_count", t.waypointCount);
+    }
+    // Do not use source age or poll count as a log key: only state changes matter.
+    QJsonObject logState{{"message", message}, {"command_id", double(m_operation.commandId)},
+                         {"stage", display.value("stage")}, {"status", display.value("status")},
+                         {"reason", display.value("reason")}, {"execution_fresh", display.value("execution_fresh")},
+                         {"execution_state", display.value("execution_state")}, {"execution_reason", display.value("execution_reason")},
+                         {"waypoint_index", display.value("waypoint_index")}};
+    const QString key = QString::fromUtf8(QJsonDocument(logState).toJson(QJsonDocument::Compact));
+    if (key != m_operation.lastLogKey) {
+        m_operation.lastLogKey = key;
+        const auto &req = m_operation.request;
+        QString details = QString("operation_id=%1 uid=%2 kind=%3 command_id=%4 boot=%5")
+            .arg(req.value("operation_id").toString(), req.value("uid").toString(), req.value("kind").toString(),
+                 QString::number(m_operation.commandId), req.value("expected_rp_boot_nonce").toString());
+        if (req.value("kind").toString() == "control_mode")
+            details += QString(" owner=%1 work=%2 expected_revision=%3").arg(req.value("mode_owner").toInt())
+                .arg(req.value("mode_state").toInt()).arg(number(req, "expected_control_revision"));
+        if (!m_operation.receipt.isEmpty())
+            details += QString(" stage=%1 status=%2 reason=%3 execution=%4/%5")
+                .arg(display.value("stage").toString(), display.value("status").toString(), display.value("reason").toString("NONE"),
+                     display.value("execution_state").toString(), display.value("execution_reason").toString());
+        emit missionProgress(message + " [" + details + "]");
+    }
+    emit operationUpdated(display);
+}
+
+bool GsClient::executionFresh() const {
+    return freshReceipt(m_operation.receipt) && m_clock.elapsed() - m_operation.lastFreshAt +
+           m_operation.receipt.value("execution_age_ms").toDouble() <= 5000;
+}
+
+void GsClient::evaluateOperation() {
+    if (m_operation.request.isEmpty()) return;
+    const auto r = m_operation.receipt, req = m_operation.request;
+    const QString stage = r.value("stage").toString(), state = r.value("execution_state").toString();
+    const QString reason = r.value("execution_reason").toString(), kind = req.value("kind").toString();
+    const auto &t = m_latestTelemetry;
+    if (!m_operation.queryError.isEmpty()) { operationNotice(m_operation.queryError); return; }
+    if (stage == "REJECTED" || stage == "CANCELLED") {
+        finishOperation(false, "任务未接受：" + r.value("status").toString() + " / " + r.value("reason").toString()); return;
+    }
+    if (executionFresh()) {
+        if (kind == "control_mode") {
+            if (state == "MODE_APPLIED" && t.controlFresh && t.uid == req.value("uid").toString() &&
+                t.bootNonce == req.value("expected_rp_boot_nonce").toString() &&
+                t.controlRevision == number(req, "expected_control_revision") + 1 &&
+                t.controlOwner == req.value("mode_owner").toInt() && t.controlState == req.value("mode_state").toInt() &&
+                t.modeGsBoot == m_operation.gsBoot && t.modeCommandId == m_operation.commandId) {
+                finishOperation(true, "模式已在船端生效，可以发布所选任务"); return;
+            }
+        } else {
+            const bool stopped = t.taskFresh && t.taskPhase == state && t.outputsOff && t.taskCommandId == m_operation.commandId &&
+                                 t.taskGsBoot == m_operation.gsBoot && t.uid == req.value("uid").toString() &&
+                                 t.bootNonce == req.value("expected_rp_boot_nonce").toString();
+            if (kind == "stop" && stopped && (state == "STOPPED" || state == "WAITING_IPC" || state == "IDLE")) {
+                finishOperation(true, "船端已停止：执行回报匹配，推进为0且动力/舵输出关闭"); return;
+            }
+            if (state == "FAILED" || state == "SUPERSEDED") {
+                finishOperation(false, executionText(state) + "：" + executionReasonText(reason)); return;
+            }
+            if (kind != "stop" && reason == "ROUTE_COMPLETE" && stopped && state != "STOPPING") {
+                finishOperation(true, "航路点已完成，输出已关闭"); return;
+            }
+            if (kind != "stop" && state == "STOPPED") {
+                finishOperation(false, "任务已停止：" + executionReasonText(reason)); return;
+            }
+            if (stage == "RP_RECEIVED" && kind != "stop") setBusy(false);
+            operationNotice(executionText(state) + " · " + executionReasonText(reason));
+            return;
+        }
+    }
+    if (stage == "RP_RECEIVED" && kind != "control_mode" && kind != "stop") setBusy(false);
+    if (stage == "TIMED_OUT") {
+        const QString transportReason = r.value("reason").toString("UNSPECIFIED");
+        const QString explanation = transportReason == "gs_radio_delivery_unconfirmed" ? "地面站无线任务未获得匹配的船端回执"
+            : transportReason == "local_uart_send_failed" ? "网关向地面站RP发送失败"
+            : transportReason == "receipt_deadline" ? "网关等待匹配回执超过时限" : "后端未确认任务交付";
+        operationNotice(explanation + "；执行结果未知（" + transportReason + "），将在确认期限内查询原操作");
+    }
+    else if (kind == "control_mode" && stage == "RP_RECEIVED") operationNotice("船端已收件，等待停止输出及实际模式生效确认");
+    else if (stage == "RP_RECEIVED") operationNotice(m_operation.receivedExecution
+        ? "执行回报已过期，当前执行结果未知；仅查询原操作" : "船端已收件，尚未获得新鲜执行回报");
+    else operationNotice("收件阶段：" + (stage.isEmpty() ? QString("结果待确认") : stage));
+}
+
+void GsClient::finishOperation(bool success, const QString &message) {
+    m_operationTimer.stop();
+    operationNotice(message);
+    auto callback = std::move(m_operation.modeCallback);
+    clearOperation();
+    emit missionResult(success, message);
+    if (callback) callback(success, message);
 }
 
 } // namespace jlusv

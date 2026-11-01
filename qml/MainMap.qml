@@ -121,14 +121,16 @@ Item {
             coordinate: QtPositioning.coordinate(mapBridge.boatLat, mapBridge.boatLon)
             anchorPoint.x: 18
             anchorPoint.y: 18
-            visible: mapBridge.boatLat !== 0.0 || mapBridge.boatLon !== 0.0
+            visible: mapBridge.isOnline && (mapBridge.boatLat !== 0.0 || mapBridge.boatLon !== 0.0)
 
             sourceItem: Item {
                 width: 36
                 height: 36
-                rotation: mapBridge.boatHeading
+                rotation: mapBridge.boatHeadingValid ? mapBridge.boatHeading : 0
 
                 Canvas {
+                    property bool directionValid: mapBridge.boatHeadingValid
+                    onDirectionValidChanged: requestPaint()
                     anchors.fill: parent
                     onPaint: {
                         var ctx = getContext("2d");
@@ -137,10 +139,14 @@ Item {
                         ctx.strokeStyle = "#D50000";
                         ctx.lineWidth = 2.5;
                         ctx.beginPath();
-                        ctx.moveTo(18, 2);
-                        ctx.lineTo(32, 32);
-                        ctx.lineTo(18, 25);
-                        ctx.lineTo(4, 32);
+                        if (directionValid) {
+                            ctx.moveTo(18, 2);
+                            ctx.lineTo(32, 32);
+                            ctx.lineTo(18, 25);
+                            ctx.lineTo(4, 32);
+                        } else {
+                            ctx.arc(18, 18, 10, 0, 2 * Math.PI);
+                        }
                         ctx.closePath();
                         ctx.fill();
                         ctx.stroke();
@@ -188,7 +194,7 @@ Item {
                 if (!isDragging && mouse.button === Qt.LeftButton) {
                     var coord = map.toCoordinate(Qt.point(mouse.x, mouse.y));
                     if (coord.isValid) {
-                        mapBridge.addWaypointFromMap(coord.latitude, coord.longitude, 1.2);
+                        mapBridge.addWaypointFromMap(coord.latitude, coord.longitude, mapBridge.defaultSpeed);
                     }
                 }
                 isDragging = false;

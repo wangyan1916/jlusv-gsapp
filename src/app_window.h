@@ -8,6 +8,8 @@
 #include <QToolButton>
 #include <QCheckBox>
 #include <QDoubleSpinBox>
+#include <QSpinBox>
+#include <QComboBox>
 #include <QTextEdit>
 #include "network/gs_client.h"
 #include "map/map_bridge.h"
@@ -38,6 +40,8 @@ private slots:
 private:
     void setupUi();
     void logMessage(const QString &msg);
+    void refreshControls();
+    int selectedWork() const;
 
     LocalTileServer *m_tileServer;
     GsClient *m_client;
@@ -50,18 +54,31 @@ private:
     QLineEdit *m_pwdEdit;
     QPushButton *m_connectBtn;
     QLabel *m_statusLabel;
+    QComboBox *m_targetSelect;
 
     QLabel *m_uidLabel;
     QLabel *m_modeLabel;
     QLabel *m_rtkLabel;
     QLabel *m_posLabel;
+    QLabel *m_positionSourceLabel;
+    QLabel *m_diffAgeLabel;
     QLabel *m_headingLabel;
+    QLabel *m_cogLabel;
     QLabel *m_speedLabel;
     QLabel *m_batteryLabel;
 
     QCheckBox *m_gcj02Check;
     QLabel *m_waypointCountLabel;
     QDoubleSpinBox *m_speedSpin;
+    QComboBox *m_ownerSelect;
+    QComboBox *m_taskSelect;
+    QPushButton *m_applyModeBtn;
+    QLabel *m_modeHint;
+    QDoubleSpinBox *m_headingSpin;
+    QDoubleSpinBox *m_throttleSpin;
+    QSpinBox *m_ttlSpin;
+    QCheckBox *m_uniformSpeed;
+    QLabel *m_executionLabel;
     QPushButton *m_publishBtn;
     QPushButton *m_stopBtn;
     QPushButton *m_clearBtn;

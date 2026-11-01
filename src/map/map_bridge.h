@@ -14,11 +14,13 @@ class MapBridge : public QObject {
     Q_PROPERTY(double boatLat READ boatLat NOTIFY boatPositionChanged)
     Q_PROPERTY(double boatLon READ boatLon NOTIFY boatPositionChanged)
     Q_PROPERTY(double boatHeading READ boatHeading NOTIFY boatHeadingChanged)
+    Q_PROPERTY(bool boatHeadingValid READ boatHeadingValid NOTIFY boatHeadingChanged)
     Q_PROPERTY(double boatSpeed READ boatSpeed NOTIFY boatTelemetryChanged)
     Q_PROPERTY(QString rtkStateText READ rtkStateText NOTIFY boatTelemetryChanged)
     Q_PROPERTY(bool isOnline READ isOnline NOTIFY boatTelemetryChanged)
     Q_PROPERTY(bool useGcj02 READ useGcj02 WRITE setUseGcj02 NOTIFY useGcj02Changed)
     Q_PROPERTY(QVariantList waypointsQml READ waypointsQml NOTIFY waypointsChanged)
+    Q_PROPERTY(double defaultSpeed READ defaultSpeed WRITE setDefaultSpeed NOTIFY defaultSpeedChanged)
 
 public:
     explicit MapBridge(QObject *parent = nullptr);
@@ -26,10 +28,15 @@ public:
     double boatLat() const { return m_displayLat; }
     double boatLon() const { return m_displayLon; }
     double boatHeading() const { return m_heading; }
+    bool boatHeadingValid() const { return m_headingValid; }
     double boatSpeed() const { return m_speed; }
     QString rtkStateText() const { return m_rtkText; }
+    QString positionSourceText() const { return m_positionSourceText; }
+    QString headingSourceText() const { return m_headingSourceText; }
     bool isOnline() const { return m_online; }
     bool useGcj02() const { return m_useGcj02; }
+    double defaultSpeed() const { return m_defaultSpeed; }
+    void setDefaultSpeed(double speed);
 
     void setUseGcj02(bool enable);
 
@@ -51,6 +58,7 @@ signals:
     void boatTelemetryChanged();
     void useGcj02Changed();
     void waypointsChanged();
+    void defaultSpeedChanged();
 
 private:
     double m_rawLat = 0.0;
@@ -60,8 +68,11 @@ private:
     double m_heading = 0.0;
     double m_speed = 0.0;
     QString m_rtkText{"未连接"};
+    QString m_positionSourceText{"来源未提供"}, m_headingSourceText{"来源未提供"};
+    bool m_headingValid = false;
     bool m_online = false;
     bool m_useGcj02 = true; // 默认开启 GCJ-02 卫星底图坐标纠偏
+    double m_defaultSpeed = 1.2;
 
     QVector<Waypoint> m_waypoints; // 存储真实 WGS-84 经纬度
     void updateDisplayPosition();

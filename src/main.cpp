@@ -8,6 +8,7 @@ int main(int argc, char *argv[]) {
 
     QApplication app(argc, argv);
     app.setApplicationName("JLUSV GroundStation");
+    app.setApplicationVersion(GSAPP_VERSION);
     app.setOrganizationName("JLUSV");
 
     jlusv::AppWindow window;

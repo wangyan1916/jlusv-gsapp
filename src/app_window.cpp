@@ -13,6 +13,10 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QRegularExpression>
+#include <QScrollArea>
+#include <QSignalBlocker>
+#include <QTextDocument>
+#include <cmath>
 
 namespace jlusv {
 
@@ -26,30 +30,65 @@ AppWindow::AppWindow(QWidget *parent)
     setupUi();
 
     connect(m_client, &GsClient::connectionStatusChanged, this, &AppWindow::onConnectionStatusChanged);
+    connect(m_client, &GsClient::telemetryUpdated, m_bridge, &MapBridge::updateTelemetry);
     connect(m_client, &GsClient::telemetryUpdated, this, &AppWindow::onTelemetryUpdated);
     connect(m_client, &GsClient::missionProgress, this, &AppWindow::logMessage);
     connect(m_client, &GsClient::missionResult, this, &AppWindow::onMissionResult);
+    connect(m_client, &GsClient::busyChanged, this, [this]() { refreshControls(); });
+    connect(m_client, &GsClient::fleetUpdated, this, [this](const QJsonArray &members) {
+        const QSignalBlocker blocker(m_targetSelect);
+        const QString uid = m_client->latestTelemetry().uid;
+        m_targetSelect->clear();
+        for (const auto &value : members) {
+            const auto member = value.toObject();
+            const QString id = member.value("uid").toString();
+            m_targetSelect->addItem(member.value("name").toString(id) + " · " + id, id);
+        }
+        int index = m_targetSelect->findData(uid);
+        if (index < 0 && !uid.isEmpty()) {
+            m_targetSelect->addItem(uid + "（当前无状态）", uid);
+            index = m_targetSelect->count() - 1;
+        }
+        m_targetSelect->setCurrentIndex(index);
+        refreshControls();
+    });
+    connect(m_client, &GsClient::operationUpdated, this, [this](const QJsonObject &op) {
+        if (op.isEmpty()) { m_executionLabel->setText("暂无操作回执"); return; }
+        const QString state = op.value("execution_fresh").toBool()
+            ? executionText(op.value("execution_state").toString()) : "执行状态未确认 / 已过期";
+        QString progress;
+        if (op.value("waypoint_count").toInt() > 0)
+            progress = QString("\n航点进度：%1 / %2").arg(op.value("waypoint_index").toInt()).arg(op.value("waypoint_count").toInt());
+        m_executionLabel->setText(QString("目标：%1\n操作：%2\n命令：%3 · 收件：%4\n执行：%5\n执行原因：%6%7\n%8\n收件原因：")
+            .arg(op.value("uid").toString(), op.value("operation_id").toString(),
+                 op.contains("command_id") ? QString::number(op.value("command_id").toDouble(), 'f', 0) : "待确认",
+                 op.value("stage").toString("待确认"), state,
+                 executionReasonText(op.value("execution_reason").toString()), progress, op.value("message").toString())
+            + op.value("reason").toString("无"));
+    });
     connect(m_client, &GsClient::authStatusChanged, this, [this](bool ok, const QString &msg) {
         if (ok) {
             m_statusLabel->setText("状态: 已连接 (安全认证成功)");
             m_statusLabel->setStyleSheet("color: green; font-weight: bold;");
             logMessage("地面站安全认证通过 (已获取写入控制会话)");
         } else {
-            m_statusLabel->setText("状态: 已连接 (认证失败)");
+            m_statusLabel->setText("状态: " + msg);
             m_statusLabel->setStyleSheet("color: #E65100; font-weight: bold;");
-            logMessage("地面站安全认证未通过: " + msg);
+            logMessage("地面站认证状态: " + msg);
         }
+        refreshControls();
     });
 
-    connect(m_client, &GsClient::telemetryUpdated, m_bridge, &MapBridge::updateTelemetry);
     connect(m_bridge, &MapBridge::waypointsChanged, this, [this]() {
         m_waypointCountLabel->setText(QString("航点数: %1 / 16").arg(m_bridge->rawWaypoints().size()));
+        refreshControls();
     });
+    refreshControls();
 }
 
 void AppWindow::setupUi() {
-    setWindowTitle("JLUSV 地面站循迹系统 (Qt 5.15.3 C++17)");
-    resize(1280, 800);
+    setWindowTitle("JLUSV 地面站 " + QCoreApplication::applicationVersion());
+    resize(1360, 960);
 
     auto *centralWidget = new QWidget(this);
     setCentralWidget(centralWidget);
@@ -67,7 +106,7 @@ void AppWindow::setupUi() {
 
     // 2. 右侧：控制与遥测面板
     auto *panelWidget = new QWidget(this);
-    panelWidget->setMaximumWidth(380);
+    panelWidget->setMinimumWidth(350);
     auto *panelLayout = new QVBoxLayout(panelWidget);
     panelLayout->setContentsMargins(0, 0, 0, 0);
 
@@ -80,24 +119,35 @@ void AppWindow::setupUi() {
     m_connectBtn = new QPushButton("连接", connGroup);
     m_statusLabel = new QLabel("状态: 未连接", connGroup);
     m_statusLabel->setStyleSheet("color: red; font-weight: bold;");
+    m_targetSelect = new QComboBox(connGroup);
     connLayout->addWidget(new QLabel("网关地址:"), 0, 0);
     connLayout->addWidget(m_ipEdit, 0, 1, 1, 2);
     connLayout->addWidget(new QLabel("控制密码:"), 1, 0);
     connLayout->addWidget(m_pwdEdit, 1, 1);
     connLayout->addWidget(m_connectBtn, 1, 2);
-    connLayout->addWidget(m_statusLabel, 2, 0, 1, 3);
+    connLayout->addWidget(new QLabel("目标船只:"), 2, 0);
+    connLayout->addWidget(m_targetSelect, 2, 1, 1, 2);
+    connLayout->addWidget(m_statusLabel, 3, 0, 1, 3);
     panelLayout->addWidget(connGroup);
 
     connect(m_connectBtn, &QPushButton::clicked, this, &AppWindow::onConnectClicked);
+    connect(m_targetSelect, QOverload<int>::of(&QComboBox::activated), this, [this](int index) {
+        m_client->setTargetUid(m_targetSelect->itemData(index).toString());
+    });
 
     // 船只状态卡片
-    auto *statusGroup = new QGroupBox("船端遥测数据 (WGS-84 RTK)", panelWidget);
+    auto *statusGroup = new QGroupBox("船端遥测数据 (WGS-84)", panelWidget);
     auto *statusLayout = new QGridLayout(statusGroup);
     m_uidLabel = new QLabel("--", statusGroup);
     m_modeLabel = new QLabel("--", statusGroup);
     m_rtkLabel = new QLabel("--", statusGroup);
     m_posLabel = new QLabel("--", statusGroup);
+    m_positionSourceLabel = new QLabel("--", statusGroup);
+    m_positionSourceLabel->setWordWrap(true);
+    m_diffAgeLabel = new QLabel("--", statusGroup);
     m_headingLabel = new QLabel("--", statusGroup);
+    m_headingLabel->setWordWrap(true);
+    m_cogLabel = new QLabel("--", statusGroup);
     m_speedLabel = new QLabel("--", statusGroup);
     m_batteryLabel = new QLabel("--", statusGroup);
 
@@ -105,33 +155,64 @@ void AppWindow::setupUi() {
     statusLayout->addWidget(m_uidLabel, 0, 1);
     statusLayout->addWidget(new QLabel("控制模式:"), 1, 0);
     statusLayout->addWidget(m_modeLabel, 1, 1);
-    statusLayout->addWidget(new QLabel("RTK 解状态:"), 2, 0);
+    statusLayout->addWidget(new QLabel("接收机解状态:"), 2, 0);
+    m_rtkLabel->setToolTip("接口状态：1=非RTK，2=FLOAT，3=FIXED。解状态与当前使用的位置来源分别显示。");
     statusLayout->addWidget(m_rtkLabel, 2, 1);
     statusLayout->addWidget(new QLabel("经纬度:"), 3, 0);
     statusLayout->addWidget(m_posLabel, 3, 1);
-    statusLayout->addWidget(new QLabel("船艏向:"), 4, 0);
-    statusLayout->addWidget(m_headingLabel, 4, 1);
-    statusLayout->addWidget(new QLabel("对地航速:"), 5, 0);
-    statusLayout->addWidget(m_speedLabel, 5, 1);
-    statusLayout->addWidget(new QLabel("电池电压:"), 6, 0);
-    statusLayout->addWidget(m_batteryLabel, 6, 1);
+    statusLayout->addWidget(new QLabel("位置来源:"), 4, 0);
+    statusLayout->addWidget(m_positionSourceLabel, 4, 1);
+    statusLayout->addWidget(new QLabel("接收机差分龄期:"), 5, 0);
+    statusLayout->addWidget(m_diffAgeLabel, 5, 1);
+    statusLayout->addWidget(new QLabel("控制方向:"), 6, 0);
+    statusLayout->addWidget(m_headingLabel, 6, 1);
+    statusLayout->addWidget(new QLabel("对地航迹向 COG:"), 7, 0);
+    statusLayout->addWidget(m_cogLabel, 7, 1);
+    statusLayout->addWidget(new QLabel("对地航速:"), 8, 0);
+    statusLayout->addWidget(m_speedLabel, 8, 1);
+    statusLayout->addWidget(new QLabel("电池电压:"), 9, 0);
+    statusLayout->addWidget(m_batteryLabel, 9, 1);
     panelLayout->addWidget(statusGroup);
 
     // 地图与坐标系设置
     auto *mapSettingGroup = new QGroupBox("底图纠偏设置", panelWidget);
     auto *mapSettingLayout = new QVBoxLayout(mapSettingGroup);
-    m_gcj02Check = new QCheckBox("开启 GCJ-02 卫星图坐标逆纠偏 (国内适用)", mapSettingGroup);
-    m_gcj02Check->setChecked(true);
+    m_gcj02Check = new QCheckBox("底图使用 GCJ-02（WGS-84 底图请取消）", mapSettingGroup);
+    m_gcj02Check->setToolTip("按实际瓦片坐标系选择。仅转换地图显示与地图点击坐标；任务下发始终使用 WGS-84。");
+    m_gcj02Check->setChecked(m_bridge->useGcj02());
     connect(m_gcj02Check, &QCheckBox::toggled, this, &AppWindow::onGcj02Toggled);
     mapSettingLayout->addWidget(m_gcj02Check);
     panelLayout->addWidget(mapSettingGroup);
 
     // 航点任务卡片
-    auto *missionGroup = new QGroupBox("循迹航线发布", panelWidget);
+    auto *missionGroup = new QGroupBox("模式与任务", panelWidget);
     auto *missionLayout = new QGridLayout(missionGroup);
+    m_ownerSelect = new QComboBox(missionGroup);
+    m_ownerSelect->addItem("主控 · 船端 RP 执行", 1);
+    m_ownerSelect->addItem("工控 · NUC 计算执行", 2);
+    m_taskSelect = new QComboBox(missionGroup);
+    m_taskSelect->addItem("航路点循迹", "waypoints");
+    m_taskSelect->addItem("航向＋航速保持", "ipc_heading_speed");
+    m_taskSelect->addItem("航向保持（固定推进）", "heading_only");
+    m_taskSelect->addItem("舵桨直控", "actuator");
+    m_applyModeBtn = new QPushButton("应用所选模式", missionGroup);
+    m_modeHint = new QLabel(missionGroup);
+    m_modeHint->setWordWrap(true);
+    m_headingSpin = new QDoubleSpinBox(missionGroup);
+    m_headingSpin->setRange(0, 359.99);
+    m_headingSpin->setSuffix(" °");
+    m_throttleSpin = new QDoubleSpinBox(missionGroup);
+    m_throttleSpin->setRange(0, 100);
+    m_throttleSpin->setSuffix(" %");
+    m_ttlSpin = new QSpinBox(missionGroup);
+    m_ttlSpin->setRange(1, 3600);
+    m_ttlSpin->setValue(300);
+    m_ttlSpin->setSuffix(" s");
+    m_uniformSpeed = new QCheckBox("发布时统一替换航点速度", missionGroup);
+    m_uniformSpeed->setChecked(false);
     m_waypointCountLabel = new QLabel("航点数: 0 / 16 (点击地图添加)", missionGroup);
     m_speedSpin = new QDoubleSpinBox(missionGroup);
-    m_speedSpin->setRange(0.2, 3.0);
+    m_speedSpin->setRange(0.0, 3.0);
     m_speedSpin->setSingleStep(0.1);
     m_speedSpin->setValue(1.2);
     m_speedSpin->setSuffix(" m/s");
@@ -155,16 +236,45 @@ void AppWindow::setupUi() {
 
     m_pasteBtn = new QPushButton("粘贴/导入航点", missionGroup);
 
-    missionLayout->addWidget(m_waypointCountLabel, 0, 0, 1, 2);
-    missionLayout->addWidget(new QLabel("期望巡航速度:"), 1, 0);
-    missionLayout->addWidget(m_speedSpin, 1, 1);
-    missionLayout->addWidget(m_undoBtn, 2, 0);
-    missionLayout->addWidget(m_clearBtn, 2, 1);
-    missionLayout->addWidget(m_copyBtn, 3, 0);
-    missionLayout->addWidget(m_pasteBtn, 3, 1);
-    missionLayout->addWidget(m_publishBtn, 4, 0, 1, 2);
-    missionLayout->addWidget(m_stopBtn, 5, 0, 1, 2);
+    missionLayout->addWidget(new QLabel("执行方:"), 0, 0);
+    missionLayout->addWidget(m_ownerSelect, 0, 1);
+    missionLayout->addWidget(new QLabel("任务类型:"), 1, 0);
+    missionLayout->addWidget(m_taskSelect, 1, 1);
+    missionLayout->addWidget(m_applyModeBtn, 2, 0, 1, 2);
+    missionLayout->addWidget(m_modeHint, 3, 0, 1, 2);
+    missionLayout->addWidget(new QLabel("目标控制方向:"), 4, 0);
+    missionLayout->addWidget(m_headingSpin, 4, 1);
+    missionLayout->addWidget(new QLabel("航速 / 新增航点默认速度:"), 5, 0);
+    missionLayout->addWidget(m_speedSpin, 5, 1);
+    missionLayout->addWidget(new QLabel("固定推进（0%仍控舵）:"), 6, 0);
+    missionLayout->addWidget(m_throttleSpin, 6, 1);
+    missionLayout->addWidget(new QLabel("航点任务有效期:"), 7, 0);
+    missionLayout->addWidget(m_ttlSpin, 7, 1);
+    missionLayout->addWidget(m_uniformSpeed, 8, 0, 1, 2);
+    missionLayout->addWidget(m_waypointCountLabel, 9, 0, 1, 2);
+    missionLayout->addWidget(m_undoBtn, 10, 0);
+    missionLayout->addWidget(m_clearBtn, 10, 1);
+    missionLayout->addWidget(m_copyBtn, 11, 0);
+    missionLayout->addWidget(m_pasteBtn, 11, 1);
+    missionLayout->addWidget(m_publishBtn, 12, 0, 1, 2);
+    missionLayout->addWidget(m_stopBtn, 13, 0, 1, 2);
     panelLayout->addWidget(missionGroup);
+    auto *feedbackGroup = new QGroupBox("船端执行反馈", panelWidget);
+    auto *feedbackLayout = new QVBoxLayout(feedbackGroup);
+    m_executionLabel = new QLabel("暂无操作回执", feedbackGroup);
+    m_executionLabel->setWordWrap(true);
+    m_executionLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    feedbackLayout->addWidget(m_executionLabel);
+    auto *queryBtn = new QPushButton("刷新操作回执", feedbackGroup);
+    feedbackLayout->addWidget(queryBtn);
+    panelLayout->addWidget(feedbackGroup);
+    connect(queryBtn, &QPushButton::clicked, m_client, &GsClient::queryOperation);
+    connect(m_ownerSelect, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() { refreshControls(); });
+    connect(m_taskSelect, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() { refreshControls(); });
+    connect(m_applyModeBtn, &QPushButton::clicked, this, [this]() {
+        m_client->switchControlMode(m_ownerSelect->currentData().toInt(), selectedWork());
+    });
+    connect(m_speedSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), m_bridge, &MapBridge::setDefaultSpeed);
 
     connect(m_publishBtn, &QPushButton::clicked, this, &AppWindow::onPublishWaypointsClicked);
     connect(m_stopBtn, &QPushButton::clicked, this, &AppWindow::onEmergencyStopClicked);
@@ -178,10 +288,16 @@ void AppWindow::setupUi() {
     auto *logLayout = new QVBoxLayout(logGroup);
     m_logEdit = new QTextEdit(logGroup);
     m_logEdit->setReadOnly(true);
+    m_logEdit->setMinimumHeight(130);
+    m_logEdit->document()->setMaximumBlockCount(500);
     logLayout->addWidget(m_logEdit);
     panelLayout->addWidget(logGroup, 1);
 
-    mainLayout->addWidget(panelWidget, 1);
+    auto *panelScroll = new QScrollArea(this);
+    panelScroll->setWidgetResizable(true);
+    panelScroll->setMinimumWidth(400);
+    panelScroll->setWidget(panelWidget);
+    mainLayout->addWidget(panelScroll, 1);
 
     logMessage("地面站启动完成。请配置网关地址并连接。");
 }
@@ -215,12 +331,16 @@ void AppWindow::onConnectionStatusChanged(bool connected) {
         m_statusLabel->setStyleSheet("color: red; font-weight: bold;");
         logMessage("地面站 HTTP 通信断开，正在重试...");
     }
+    refreshControls();
 }
 
 void AppWindow::onTelemetryUpdated(const UsvTelemetry &t) {
     m_uidLabel->setText(t.uid.isEmpty() ? "--" : t.uid);
 
-    if (t.controlOwner == 1 && t.controlState == 3) {
+    if (!t.controlFresh) {
+        m_modeLabel->setText("未知 / 回报过期");
+        m_modeLabel->setStyleSheet("color: gray;");
+    } else if (t.controlOwner == 1 && t.controlState == 3) {
         m_modeLabel->setText("MAIN / WAYPOINTS (循迹)");
         m_modeLabel->setStyleSheet("color: green; font-weight: bold;");
     } else if (t.controlOwner == 1 && t.controlState == 1) {
@@ -230,7 +350,7 @@ void AppWindow::onTelemetryUpdated(const UsvTelemetry &t) {
         m_modeLabel->setText("MAIN / HEADING (定向)");
         m_modeLabel->setStyleSheet("color: #1565C0; font-weight: bold;");
     } else if (t.controlOwner == 2) {
-        m_modeLabel->setText("IPC / 自动驾驶");
+        m_modeLabel->setText("IPC / " + QString(t.controlState == 3 ? "航路点循迹" : t.controlState == 2 ? "航向控制" : "舵桨直控"));
         m_modeLabel->setStyleSheet("color: #6A1B9A; font-weight: bold;");
     } else {
         m_modeLabel->setText(t.controlOwnerStr + " / " + t.controlStateStr);
@@ -238,10 +358,50 @@ void AppWindow::onTelemetryUpdated(const UsvTelemetry &t) {
     }
 
     m_rtkLabel->setText(m_bridge->rtkStateText());
-    m_posLabel->setText(QString("%1, %2").arg(t.latDeg, 0, 'f', 6).arg(t.lonDeg, 0, 'f', 6));
-    m_headingLabel->setText(QString("%1°").arg(t.headingDeg, 0, 'f', 1));
-    m_speedLabel->setText(QString("%1 m/s").arg(t.sogMps, 0, 'f', 2));
-    m_batteryLabel->setText(QString("%1 V").arg(t.batteryV, 0, 'f', 2));
+    m_posLabel->setText(t.positionValid ? QString("%1, %2").arg(t.latDeg, 0, 'f', 7).arg(t.lonDeg, 0, 'f', 7) : "无有效位置");
+    m_positionSourceLabel->setText(m_bridge->positionSourceText());
+    m_diffAgeLabel->setText(t.diffAgeMs >= 0 ? QString("%1 s").arg(t.diffAgeMs / 1000.0, 0, 'f', 2)
+        : t.diffAgeState == "STALE" || t.diffAgeState == "EXPIRED" ? "过期" : "未知 / 未提供");
+    m_headingLabel->setText((t.headingValid ? QString("%1°").arg(t.headingDeg, 0, 'f', 1) : "无有效控制方向")
+        + "\n" + m_bridge->headingSourceText());
+    m_headingLabel->setToolTip(t.headingReason);
+    m_cogLabel->setText(t.cogValid ? QString("%1°（真北）").arg(t.cogDeg, 0, 'f', 1) : "无有效 COG");
+    m_speedLabel->setText(t.speedValid ? QString("%1 m/s").arg(t.sogMps, 0, 'f', 2) : "无有效航速");
+    m_batteryLabel->setText(t.batteryValid ? QString("%1 V").arg(t.batteryV, 0, 'f', 2) : "--");
+    refreshControls();
+}
+
+int AppWindow::selectedWork() const {
+    const QString kind = m_taskSelect->currentData().toString();
+    return kind == "actuator" ? 1 : kind == "waypoints" ? 3 : 2;
+}
+
+void AppWindow::refreshControls() {
+    const bool busy = m_client->isBusy();
+    const int owner = m_ownerSelect->currentData().toInt(), work = selectedWork();
+    const QString kind = m_taskSelect->currentData().toString();
+    const bool selected = m_client->canPublish(owner, work);
+    m_targetSelect->setEnabled(!busy);
+    m_ownerSelect->setEnabled(!busy);
+    m_taskSelect->setEnabled(!busy);
+    m_connectBtn->setEnabled(!busy);
+    m_applyModeBtn->setEnabled(!busy && m_client->canControl());
+    m_publishBtn->setEnabled(selected && work != 1 && (work != 3 || !m_bridge->rawWaypoints().isEmpty()));
+    m_publishBtn->setText("发布" + m_ownerSelect->currentText().section(" · ", 0, 0) + m_taskSelect->currentText());
+    m_stopBtn->setEnabled(m_client->canControl(false));
+    m_headingSpin->setEnabled(!busy && work == 2);
+    m_speedSpin->setEnabled(!busy && kind != "heading_only" && work != 1);
+    m_throttleSpin->setEnabled(!busy && kind == "heading_only");
+    m_ttlSpin->setEnabled(!busy && work == 3);
+    m_uniformSpeed->setEnabled(!busy && work == 3);
+    if (busy) m_modeHint->setText("正在等待操作确认；停船按钮仍可抢占当前操作。");
+    else if (!m_client->canControl()) m_modeHint->setText("请连接认证并等待目标船LoRa身份与新鲜控制模式回报。");
+    else if (!selected) m_modeHint->setText("所选模式与船端不同。请应用模式，等待实际生效后发布。");
+    else if (work == 1) m_modeHint->setText(owner == 1
+        ? "主控舵桨模式已确认。操纵请使用网关遥控页 /remote。" : "工控舵桨模式已确认，等待对应的新ROS舵桨主题。");
+    else m_modeHint->setText(kind == "heading_only"
+        ? "模式已确认。固定推进只需有效控制方向；0%仍会自动控舵。"
+        : work == 3 ? "模式已确认。航点使用WGS-84；默认保留逐点速度。" : "模式已确认。发布后等待有效控制方向与航速反馈。");
 }
 
 void AppWindow::onGcj02Toggled(bool checked) {
@@ -250,25 +410,32 @@ void AppWindow::onGcj02Toggled(bool checked) {
 }
 
 void AppWindow::onPublishWaypointsClicked() {
+    const int owner = m_ownerSelect->currentData().toInt();
+    const QString kind = m_taskSelect->currentData().toString();
+    if (kind == "ipc_heading_speed") {
+        m_client->submitHeadingSpeed(owner, m_headingSpin->value(), m_speedSpin->value());
+        return;
+    }
+    if (kind == "heading_only") {
+        m_client->submitHeadingOnly(owner, m_headingSpin->value(), m_throttleSpin->value());
+        return;
+    }
+    if (kind != "waypoints") return;
     auto wps = m_bridge->rawWaypoints();
     if (wps.isEmpty()) {
         QMessageBox::warning(this, "提示", "请先在地图上点击添加至少 1 个航点！");
         return;
     }
     const double targetSpeed = m_speedSpin->value();
-    for (auto &wp : wps) {
-        wp.speedMps = targetSpeed;
-    }
+    if (m_uniformSpeed->isChecked()) for (auto &wp : wps) wp.speedMps = targetSpeed;
 
     logMessage(QString("正在发布 %1 个航点至地面站...").arg(wps.size()));
-    m_client->submitWaypoints(wps, 300);
+    m_client->submitWaypoints(wps, m_ttlSpin->value(), owner);
 }
 
 void AppWindow::onEmergencyStopClicked() {
-    if (QMessageBox::question(this, "警告", "确认紧急制动并停止当前所有任务？") == QMessageBox::Yes) {
-        logMessage("正在发送急停命令...");
-        m_client->submitEmergencyStop();
-    }
+    logMessage("正在发送急停命令，等待船端输出关闭证明...");
+    m_client->submitEmergencyStop();
 }
 
 void AppWindow::onClearWaypointsClicked() {
@@ -341,6 +508,7 @@ void AppWindow::onPasteWaypointsClicked() {
 
     QVector<Waypoint> imported;
     const double defaultSpeed = m_speedSpin->value();
+    bool invalid = false;
 
     // 1. 尝试解析 JSON 格式
     QJsonParseError jsonErr;
@@ -351,6 +519,11 @@ void AppWindow::onPasteWaypointsClicked() {
             if (val.isObject()) {
                 const QJsonObject obj = val.toObject();
                 Waypoint wp;
+                const auto latValue = obj.value(obj.contains("lat") ? "lat" : "lat_deg");
+                const auto lonValue = obj.value(obj.contains("lon") ? "lon" : "lon_deg");
+                const auto speedValue = obj.value(obj.contains("speed_mps") ? "speed_mps" : "speed");
+                if (!latValue.isDouble() || !lonValue.isDouble() ||
+                    (!speedValue.isUndefined() && !speedValue.isDouble())) { invalid = true; break; }
                 // 支持 lat / lat_deg
                 if (obj.contains("lat")) wp.latDeg = obj.value("lat").toDouble();
                 else if (obj.contains("lat_deg")) wp.latDeg = obj.value("lat_deg").toDouble();
@@ -366,15 +539,17 @@ void AppWindow::onPasteWaypointsClicked() {
                 else if (obj.contains("speed")) wp.speedMps = obj.value("speed").toDouble();
                 else wp.speedMps = defaultSpeed;
 
-                if (wp.latDeg >= -90.0 && wp.latDeg <= 90.0 && wp.lonDeg >= -180.0 && wp.lonDeg <= 180.0) {
+                if (std::isfinite(wp.latDeg) && std::isfinite(wp.lonDeg) && std::isfinite(wp.speedMps) &&
+                    wp.latDeg >= -90.0 && wp.latDeg <= 90.0 && wp.lonDeg >= -180.0 && wp.lonDeg <= 180.0 &&
+                    wp.speedMps >= 0 && wp.speedMps <= 3) {
                     imported.append(wp);
-                }
-            }
+                } else { invalid = true; break; }
+            } else { invalid = true; break; }
         }
     }
 
     // 2. 若非 JSON，按行纯文本解析 (每行: 纬度, 经度, 速度 m/s 或 纬度, 经度)
-    if (imported.isEmpty()) {
+    if (jsonErr.error != QJsonParseError::NoError && !text.startsWith('[') && !text.startsWith('{')) {
         const QStringList lines = text.split('\n', Qt::SkipEmptyParts);
         for (QString line : lines) {
             line = line.trimmed();
@@ -386,7 +561,7 @@ void AppWindow::onPasteWaypointsClicked() {
             line.remove("m/s", Qt::CaseInsensitive);
             line.remove("mps", Qt::CaseInsensitive);
 
-            static const QRegularExpression re(R"(([+-]?\d+\.?\d*)\s*[,，\s]\s*([+-]?\d+\.?\d*)(?:\s*[,，\s]\s*([+-]?\d+\.?\d*))?)");
+            static const QRegularExpression re(R"(^([+-]?\d+\.?\d*)\s*[,，\s]\s*([+-]?\d+\.?\d*)(?:\s*[,，\s]\s*([+-]?\d+\.?\d*))?\s*$)");
             const auto match = re.match(line);
             if (match.hasMatch()) {
                 double lat = match.captured(1).toDouble();
@@ -395,25 +570,21 @@ void AppWindow::onPasteWaypointsClicked() {
                 if (!match.captured(3).isEmpty()) {
                     spd = match.captured(3).toDouble();
                 }
-                if (lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) {
+                if (std::isfinite(lat) && std::isfinite(lon) && std::isfinite(spd) &&
+                    lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0 && spd >= 0 && spd <= 3) {
                     Waypoint wp;
                     wp.latDeg = lat;
                     wp.lonDeg = lon;
-                    wp.speedMps = (spd > 0.05 && spd <= 10.0) ? spd : defaultSpeed;
+                    wp.speedMps = spd;
                     imported.append(wp);
-                }
-            }
+                } else { invalid = true; break; }
+            } else { invalid = true; break; }
         }
     }
 
-    if (imported.isEmpty()) {
-        QMessageBox::warning(this, "解析失败", "无法从剪贴板内容识别有效的经纬度航点数据。\n支持格式：\n1. 每行: 纬度, 经度, 速度 m/s (如: 43.8254400, 125.2883200, 1.20 m/s)\n2. JSON 数组: [{\"lat\": 43.825, \"lon\": 125.288}, ...]");
+    if (invalid || imported.isEmpty() || imported.size() > 16) {
+        QMessageBox::warning(this, "解析失败", "航线未改变。请提供1～16个合法WGS-84航点，速度0～3 m/s。\n支持每行：纬度, 经度, 速度 m/s；或JSON数组。无效行不会被跳过，超量不会被截断。");
         return;
-    }
-
-    if (imported.size() > 16) {
-        imported.resize(16);
-        logMessage("导入航点超过 16 个上限，已自动保留前 16 个航点。");
     }
 
     m_bridge->setRawWaypoints(imported);
@@ -422,12 +593,9 @@ void AppWindow::onPasteWaypointsClicked() {
 }
 
 void AppWindow::onMissionResult(bool success, const QString &message) {
-    logMessage(QString("任务应答: [%1] %2").arg(success ? "成功" : "失败", message));
-    if (success) {
-        QMessageBox::information(this, "任务发布成功", message);
-    } else {
-        QMessageBox::critical(this, "错误", message);
-    }
+    logMessage(QString("操作反馈: [%1] %2").arg(success ? "已确认" : "未完成 / 未确认", message));
+    m_executionLabel->setText(message + "\n" + m_executionLabel->text());
+    refreshControls();
 }
 
 } // namespace jlusv
