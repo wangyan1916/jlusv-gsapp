@@ -61,3 +61,5 @@ ctest --test-dir build -C Release --output-on-failure
 在VS 2022 x64开发环境中执行。测试仅访问127.0.0.1的临时模拟网关；QtTest详情写入构建目录的 `gs-client-tests.txt`。
 唯一交付入口为本库已有的 `build/Release/jlusv_gsapp.exe`，Qt/QML/MSVC依赖保持在同目录。
 直接双击EXE即可，地图服务按EXE位置找到本库 `maps/tiles`（相对Release目录的 `../../maps/tiles`），不依赖启动工作目录或额外脚本，不复制地图资产。
+
+复制到另一台Windows x64电脑时，执行 `python tools/package_portable.py`，使用生成的 `build/portable-dist/JLUSV-GSApp-1.1.4-Windows-x64-portable.zip`。完整解压后双击其中EXE；不要只复制EXE。便携包包含Qt/QML/地图插件、MSVC运行库、相对路径qt.conf及现有离线瓦片，地图覆盖范围与原机相同；无需安装开发环境，仍需正常显卡驱动。包内不带控制密码或设备会话。
