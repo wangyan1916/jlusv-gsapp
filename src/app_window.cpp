@@ -60,7 +60,8 @@ AppWindow::AppWindow(QWidget *parent)
             ? executionText(op.value("execution_state").toString()) : "执行状态未确认 / 已过期";
         QString progress;
         if (op.value("waypoint_count").toInt() > 0)
-            progress = QString("\n航点进度：%1 / %2").arg(op.value("waypoint_index").toInt()).arg(op.value("waypoint_count").toInt());
+            progress = QString("\n%1进度：%2 / %3").arg(op.value("kind").toString()=="turning"||op.value("kind").toString()=="zigzag"?"实验":"航点")
+                .arg(op.value("waypoint_index").toInt()).arg(op.value("waypoint_count").toInt());
         m_executionLabel->setText(QString("目标：%1\n操作：%2\n命令：%3 · 收件：%4\n执行：%5\n执行原因：%6%7\n%8\n收件原因：")
             .arg(op.value("uid").toString(), op.value("operation_id").toString(),
                  op.contains("command_id") ? QString::number(op.value("command_id").toDouble(), 'f', 0) : "待确认",
@@ -220,6 +221,8 @@ void AppWindow::setupUi() {
     m_taskSelect->addItem("航向＋航速保持", "ipc_heading_speed");
     m_taskSelect->addItem("航向保持（固定推进）", "heading_only");
     m_taskSelect->addItem("舵桨直控", "actuator");
+    m_taskSelect->addItem("回转实验", "turning");
+    m_taskSelect->addItem("Z 型实验", "zigzag");
     m_applyModeBtn = new QPushButton("应用所选模式", missionGroup);
     m_modeHint = new QLabel(missionGroup);
     m_modeHint->setWordWrap(true);
@@ -283,6 +286,43 @@ void AppWindow::setupUi() {
     missionLayout->addWidget(m_pasteBtn, 11, 1);
     missionLayout->addWidget(m_publishBtn, 12, 0, 1, 2);
     missionLayout->addWidget(m_stopBtn, 13, 0, 1, 2);
+    m_maneuverGroup = new QGroupBox("操纵实验参数", missionGroup);
+    auto *experimentLayout = new QGridLayout(m_maneuverGroup);
+    m_maneuverRudder = new QDoubleSpinBox(m_maneuverGroup);
+    m_maneuverRudder->setRange(-30,30); m_maneuverRudder->setDecimals(1); m_maneuverRudder->setValue(10); m_maneuverRudder->setSuffix(" °");
+    m_maneuverRudder->setToolTip("正值先右转，负值先左转；相对舵零，0°不能作为实验激励。");
+    m_maneuverThreshold = new QDoubleSpinBox(m_maneuverGroup);
+    m_maneuverThreshold->setRange(1,90); m_maneuverThreshold->setDecimals(1); m_maneuverThreshold->setValue(10); m_maneuverThreshold->setSuffix(" °");
+    m_maneuverDriveMode = new QComboBox(m_maneuverGroup);
+    m_maneuverDriveMode->addItem("固定推进",0); m_maneuverDriveMode->addItem("保持航速",1);
+    m_maneuverDrive = new QDoubleSpinBox(m_maneuverGroup);
+    m_maneuverDrive->setRange(0,100); m_maneuverDrive->setValue(10); m_maneuverDrive->setSuffix(" %");
+    m_maneuverCount = new QSpinBox(m_maneuverGroup);
+    m_maneuverCount->setRange(4,16); m_maneuverCount->setValue(6); m_maneuverCount->setSuffix(" ×90°");
+    m_maneuverCountLabel = new QLabel("回转总角度:",m_maneuverGroup);
+    m_maneuverSeconds = new QSpinBox(m_maneuverGroup);
+    m_maneuverSeconds->setRange(10,600); m_maneuverSeconds->setValue(120); m_maneuverSeconds->setSuffix(" s");
+    experimentLayout->addWidget(new QLabel("舵角 / 起始方向:"),0,0); experimentLayout->addWidget(m_maneuverRudder,0,1);
+    experimentLayout->addWidget(new QLabel("推进方式:"),1,0); experimentLayout->addWidget(m_maneuverDriveMode,1,1);
+    experimentLayout->addWidget(new QLabel("推进 / 航速目标:"),2,0); experimentLayout->addWidget(m_maneuverDrive,2,1);
+    experimentLayout->addWidget(new QLabel("Z 型反舵偏角:"),3,0); experimentLayout->addWidget(m_maneuverThreshold,3,1);
+    experimentLayout->addWidget(m_maneuverCountLabel,4,0); experimentLayout->addWidget(m_maneuverCount,4,1);
+    experimentLayout->addWidget(new QLabel("最长总时长:"),5,0); experimentLayout->addWidget(m_maneuverSeconds,5,1);
+    auto *experimentHint = new QLabel("先预备直航5秒，再执行实验。需新鲜定位和直接磁艏向；定速另需有效航速。完整原始记录保存在船端工控机。",m_maneuverGroup);
+    experimentHint->setWordWrap(true); experimentLayout->addWidget(experimentHint,6,0,1,2);
+    missionLayout->addWidget(m_maneuverGroup,14,0,1,2); m_maneuverGroup->hide();
+    connect(m_maneuverDriveMode,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int){
+        const bool speed=m_maneuverDriveMode->currentData().toInt()==1;
+        m_maneuverDrive->setRange(speed?.1:0,speed?3:100); m_maneuverDrive->setValue(speed?1:10);
+        m_maneuverDrive->setSuffix(speed?" m/s":" %");
+    });
+    connect(m_taskSelect,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int){
+        const QString kind=m_taskSelect->currentData().toString(); const bool zig=kind=="zigzag";
+        if(kind=="turning"||zig)m_ownerSelect->setCurrentIndex(m_ownerSelect->findData(2));
+        m_maneuverCount->setRange(zig?1:4,16); m_maneuverCount->setValue(zig?4:6);
+        m_maneuverCount->setSuffix(zig?" 次":" ×90°"); m_maneuverCountLabel->setText(zig?"反舵次数:":"回转总角度:");
+        refreshControls();
+    });
     panelLayout->addWidget(missionGroup);
     auto *feedbackGroup = new QGroupBox("船端执行反馈", panelWidget);
     auto *feedbackLayout = new QVBoxLayout(feedbackGroup);
@@ -426,17 +466,20 @@ void AppWindow::refreshControls() {
     const bool busy = m_client->isBusy();
     const int owner = m_ownerSelect->currentData().toInt(), work = selectedWork();
     const QString kind = m_taskSelect->currentData().toString();
+    const bool experiment=kind=="turning"||kind=="zigzag";
+    m_maneuverGroup->setVisible(experiment); m_maneuverGroup->setEnabled(!busy);
+    m_maneuverThreshold->setEnabled(kind=="zigzag");
     const bool selected = m_client->canPublish(owner, work);
     m_targetSelect->setEnabled(!busy);
-    m_ownerSelect->setEnabled(!busy);
+    m_ownerSelect->setEnabled(!busy&&!experiment);
     m_taskSelect->setEnabled(!busy);
     m_connectBtn->setEnabled(!busy);
     m_applyModeBtn->setEnabled(!busy && m_client->canControl());
     m_publishBtn->setEnabled(selected && work != 1 && (work != 3 || !m_bridge->rawWaypoints().isEmpty()));
     m_publishBtn->setText("发布" + m_ownerSelect->currentText().section(" · ", 0, 0) + m_taskSelect->currentText());
     m_stopBtn->setEnabled(m_client->canControl(false));
-    m_headingSpin->setEnabled(!busy && work == 2);
-    m_speedSpin->setEnabled(!busy && kind != "heading_only" && work != 1);
+    m_headingSpin->setEnabled(!busy && work == 2 && !experiment);
+    m_speedSpin->setEnabled(!busy && kind != "heading_only" && work != 1 && !experiment);
     m_throttleSpin->setEnabled(!busy && kind == "heading_only");
     m_ttlSpin->setEnabled(!busy && work == 3);
     m_uniformSpeed->setEnabled(!busy && work == 3);
@@ -445,6 +488,7 @@ void AppWindow::refreshControls() {
     else if (!selected) m_modeHint->setText("所选模式与船端不同。请应用模式，等待实际生效后发布。");
     else if (work == 1) m_modeHint->setText(owner == 1
         ? "主控舵桨模式已确认。操纵请使用网关遥控页 /remote。" : "工控舵桨模式已确认，等待对应的新ROS舵桨主题。");
+    else if(experiment)m_modeHint->setText("工控任务模式已确认。实验由 IPC 本地执行；请先停船，再发布实验。停止按钮可随时取消。");
     else m_modeHint->setText(kind == "heading_only"
         ? "模式已确认。固定推进只需有效控制方向；0%仍会自动控舵。"
         : work == 3 ? "模式已确认。航点使用WGS-84；默认保留逐点速度。" : "模式已确认。发布后等待有效控制方向与航速反馈。");
@@ -458,6 +502,11 @@ void AppWindow::onGcj02Toggled(bool checked) {
 void AppWindow::onPublishWaypointsClicked() {
     const int owner = m_ownerSelect->currentData().toInt();
     const QString kind = m_taskSelect->currentData().toString();
+    if(kind=="turning"||kind=="zigzag"){
+        m_client->submitManeuver(kind=="zigzag",m_maneuverRudder->value(),m_maneuverDriveMode->currentData().toInt()==1,
+            m_maneuverDrive->value(),kind=="zigzag"?m_maneuverThreshold->value():0,m_maneuverCount->value(),m_maneuverSeconds->value());
+        return;
+    }
     if (kind == "ipc_heading_speed") {
         m_client->submitHeadingSpeed(owner, m_headingSpin->value(), m_speedSpin->value());
         return;

@@ -147,6 +147,59 @@ private:
         QTRY_VERIFY_WITH_TIMEOUT(client.canControl(), 3000);
     }
 private slots:
+    void maneuverRequest_data() {
+        QTest::addColumn<bool>("zigzag"); QTest::addColumn<bool>("speed");
+        QTest::newRow("turn-thrust") << false << false;
+        QTest::newRow("turn-speed") << false << true;
+        QTest::newRow("zigzag-thrust") << true << false;
+        QTest::newRow("zigzag-speed") << true << true;
+    }
+    void maneuverRequest() {
+        QFETCH(bool, zigzag); QFETCH(bool, speed);
+        Gateway g; g.owner=2; g.work=2; GsClient c; connectClient(c,g);
+        c.submitManeuver(zigzag,-10,speed,speed?1.2:20,zigzag?20:0,zigzag?4:6,120);
+        QTRY_COMPARE(g.posts.size(),1);
+        const auto request=g.posts.first();
+        QCOMPARE(request.value("kind").toString(),zigzag?QString("zigzag"):QString("turning"));
+        QCOMPARE(request.value("rudder_deg").toDouble(),-10.0);
+        QCOMPARE(request.value("drive_mode").toString(),speed?QString("speed"):QString("thrust"));
+        QCOMPARE(request.value("threshold_deg").toDouble(),zigzag?20.0:0.0);
+        QCOMPARE(request.value("count").toInt(),zigzag?4:6);
+        QCOMPARE(request.value("max_seconds").toInt(),120);
+        QCOMPARE(request.contains("speed_mps"),speed); QCOMPARE(request.contains("throttle_percent"),!speed);
+        QVERIFY(g.headersOk);
+    }
+    void maneuverCompletionNeedsOutputProof_data() {
+        QTest::addColumn<bool>("success");
+        QTest::newRow("completed") << true; QTest::newRow("aborted") << false;
+    }
+    void maneuverCompletionNeedsOutputProof() {
+        QFETCH(bool, success);
+        Gateway g; g.owner=2; g.work=2; GsClient c; connectClient(c,g);
+        QSignalSpy result(&c,&GsClient::missionResult);
+        c.submitManeuver(true,10,false,20,20,4,120); QTRY_COMPARE(g.posts.size(),1);
+        g.outputsOn=true; g.execution("RUNNING"); c.queryOperation(); QTest::qWait(300);
+        QCOMPARE(result.size(),0);
+        g.execution("WAITING_IPC",success?"EXPERIMENT_COMPLETE":"EXPERIMENT_ABORTED");
+        c.queryOperation(); QTest::qWait(300); QCOMPARE(result.size(),0);
+        g.outputsOn=false;
+        QTRY_COMPARE_WITH_TIMEOUT(result.size(),1,3000);
+        QCOMPARE(result[0][0].toBool(),success); QCOMPARE(g.posts.size(),1);
+    }
+    void maneuverRejectsInvalidOrActiveTask() {
+        Gateway g; g.owner=2; g.work=2; GsClient c; connectClient(c,g);
+        QSignalSpy result(&c,&GsClient::missionResult);
+        c.submitManeuver(false,0,false,20,0,6,120);
+        c.submitManeuver(true,10,false,20,0,4,120);
+        c.submitManeuver(false,10,true,0,0,6,120);
+        c.submitManeuver(false,10,false,101,0,6,120);
+        c.submitManeuver(false,10,false,20,0,6,601);
+        QCOMPARE(result.size(),5); QVERIFY(g.posts.isEmpty());
+        g.execution("RUNNING"); QTRY_COMPARE(c.latestTelemetry().taskPhase,QString("RUNNING"));
+        c.submitManeuver(false,10,false,20,0,6,120);
+        QCOMPARE(result.size(),6); QVERIFY(g.posts.isEmpty());
+    }
+
     void groundStationReceiverContract_data() {
         QTest::addColumn<QJsonObject>("snapshot");
         QTest::addColumn<bool>("valid");

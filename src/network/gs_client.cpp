@@ -69,6 +69,8 @@ QString executionReasonText(const QString &reason) {
     if (reason == "MODE_CHANGED") return "控制模式已切换";
     if (reason == "USER_STOP") return "用户停止";
     if (reason == "ROUTE_COMPLETE") return "航路点已完成";
+    if (reason == "EXPERIMENT_COMPLETE") return "实验已完成";
+    if (reason == "EXPERIMENT_ABORTED") return "实验中止：条件失效、达到时限或配置不满足，详见船端日志";
     if (reason == "NEWER_TASK") return "已有更新任务";
     if (reason == "WAITING_FRESH_EXECUTION_REPORT") return "等待船端新鲜执行回报";
     return reason;
@@ -429,6 +431,26 @@ void GsClient::submitHeadingOnly(int owner, double headingDeg, double throttlePe
     beginOperation(req);
 }
 
+void GsClient::submitManeuver(bool zigzag, double rudderDeg, bool speedMode, double drive,
+                              double thresholdDeg, int count, int maxSeconds) {
+    if (!std::isfinite(rudderDeg) || std::abs(rudderDeg) < 1 || std::abs(rudderDeg) > 30 ||
+        !std::isfinite(drive) || drive < 0 || drive > (speedMode ? 3 : 100) || (speedMode && drive == 0) ||
+        !std::isfinite(thresholdDeg) || (zigzag ? thresholdDeg < 1 || thresholdDeg > 90 : thresholdDeg != 0) ||
+        count < (zigzag ? 1 : 4) || count > 16 || maxSeconds < 10 || maxSeconds > 600) {
+        emit missionResult(false, "实验参数无效：舵角±1～30°，定速须大于0且不超过3m/s，固定推进0～100%，时限10～600秒"); return;
+    }
+    if (m_latestTelemetry.taskFresh && (m_latestTelemetry.taskPhase == "RUNNING" ||
+        m_latestTelemetry.taskPhase == "STARTING" || m_latestTelemetry.taskPhase == "STOPPING")) {
+        emit missionResult(false, "请先停船并确认输出关闭，再发布新实验"); return;
+    }
+    auto req = taskRequest(zigzag ? "zigzag" : "turning", 2, 2);
+    if (req.isEmpty()) return;
+    req.insert("rudder_deg", rudderDeg); req.insert("drive_mode", speedMode ? "speed" : "thrust");
+    req.insert(speedMode ? "speed_mps" : "throttle_percent", drive);
+    req.insert("threshold_deg", zigzag ? thresholdDeg : 0); req.insert("count", count); req.insert("max_seconds", maxSeconds);
+    beginOperation(req);
+}
+
 void GsClient::submitEmergencyStop() {
     // STOP preempts local submission/mode tracking and does not require a fresh mode.
     if (!canControl(false)) { emit missionResult(false, "无法发送停船：等待目标船LoRa身份和网关认证"); return; }
@@ -603,6 +625,10 @@ void GsClient::evaluateOperation() {
             }
             if (kind != "stop" && reason == "ROUTE_COMPLETE" && stopped && state != "STOPPING") {
                 finishOperation(true, "航路点已完成，输出已关闭"); return;
+            }
+            if ((kind == "turning" || kind == "zigzag") && stopped && state != "STOPPING" &&
+                (reason == "EXPERIMENT_COMPLETE" || reason == "EXPERIMENT_ABORTED")) {
+                finishOperation(reason == "EXPERIMENT_COMPLETE", executionReasonText(reason) + "；船端已确认输出关闭"); return;
             }
             if (kind != "stop" && state == "STOPPED") {
                 finishOperation(false, "任务已停止：" + executionReasonText(reason)); return;

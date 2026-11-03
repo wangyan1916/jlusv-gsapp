@@ -10,6 +10,7 @@
 #include <QDoubleSpinBox>
 #include <QSpinBox>
 #include <QComboBox>
+#include <QGroupBox>
 #include <QTextEdit>
 #include "network/gs_client.h"
 #include "map/map_bridge.h"
@@ -84,6 +85,14 @@ private:
     QDoubleSpinBox *m_throttleSpin;
     QSpinBox *m_ttlSpin;
     QCheckBox *m_uniformSpeed;
+    QGroupBox *m_maneuverGroup;
+    QDoubleSpinBox *m_maneuverRudder;
+    QDoubleSpinBox *m_maneuverThreshold;
+    QComboBox *m_maneuverDriveMode;
+    QDoubleSpinBox *m_maneuverDrive;
+    QSpinBox *m_maneuverCount;
+    QSpinBox *m_maneuverSeconds;
+    QLabel *m_maneuverCountLabel;
     QLabel *m_executionLabel;
     QPushButton *m_publishBtn;
     QPushButton *m_stopBtn;

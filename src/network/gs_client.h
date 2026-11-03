@@ -67,6 +67,8 @@ public:
     void submitWaypoints(const QVector<Waypoint> &points, int ttlSeconds = 300, int owner = 1);
     void submitHeadingSpeed(int owner, double headingDeg, double speedMps);
     void submitHeadingOnly(int owner, double headingDeg, double throttlePercent);
+    void submitManeuver(bool zigzag, double rudderDeg, bool speedMode, double drive,
+                        double thresholdDeg, int count, int maxSeconds);
     void submitEmergencyStop();
     void queryOperation();
 
