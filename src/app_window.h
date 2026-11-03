@@ -41,6 +41,7 @@ private:
     void setupUi();
     void logMessage(const QString &msg);
     void refreshControls();
+    void refreshPositionDetails();
     int selectedWork() const;
 
     LocalTileServer *m_tileServer;
@@ -66,6 +67,11 @@ private:
     QLabel *m_cogLabel;
     QLabel *m_speedLabel;
     QLabel *m_batteryLabel;
+    QLabel *m_gsPosLabel;
+    QLabel *m_gsSourceLabel;
+    QLabel *m_gsAgeLabel;
+    QLabel *m_relativeDistanceLabel;
+    QLabel *m_relativeOffsetLabel;
 
     QCheckBox *m_gcj02Check;
     QLabel *m_waypointCountLabel;

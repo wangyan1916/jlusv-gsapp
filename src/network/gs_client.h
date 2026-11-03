@@ -18,6 +18,13 @@ struct Waypoint {
     double speedMps = 1.2;
 };
 
+struct GroundStationPosition {
+    bool available = false, valid = false, estimated = false, old = false;
+    double latDeg = 0.0, lonDeg = 0.0;
+    QString source;
+    qint64 ageMs = -1;
+};
+
 struct UsvTelemetry {
     QString uid, bootNonce;
     bool available = false, fresh = false, positionValid = false;
@@ -50,6 +57,7 @@ public:
     bool canControl(bool requireMode = true) const;
     bool canPublish(int owner, int work) const;
     const UsvTelemetry &latestTelemetry() const { return m_latestTelemetry; }
+    const GroundStationPosition &groundStationPosition() const { return m_groundPosition; }
     void setTargetUid(const QString &uid);
     void startPolling(int intervalMs = 500);
     void stopPolling();
@@ -64,6 +72,7 @@ public:
 
 signals:
     void telemetryUpdated(const UsvTelemetry &telemetry);
+    void groundStationUpdated(const GroundStationPosition &position);
     void fleetUpdated(const QJsonArray &members);
     void operationUpdated(const QJsonObject &operation);
     void missionProgress(const QString &message);
@@ -82,6 +91,8 @@ private:
         std::function<void(bool, const QString &)> modeCallback;
     };
     void pollOverview();
+    void pollGroundStation();
+    void updateGroundStationPosition();
     void updateTelemetry();
     void invalidateTelemetry();
     void resetContext(const QString &reason);
@@ -104,12 +115,16 @@ private:
     QElapsedTimer m_clock;
     QJsonArray m_members;
     UsvTelemetry m_latestTelemetry;
+    GroundStationPosition m_groundPosition;
+    QJsonObject m_groundSnapshot;
     Operation m_operation;
     quint64 m_context = 0, m_operationToken = 0, m_queryToken = 0;
     qint64 m_overviewAt = -10000;
     qint64 m_navigationAge = 5001;
+    qint64 m_groundAt = -10000, m_groundRequestedAt = -10000;
     bool m_authenticated = false, m_connected = false, m_busy = false;
     bool m_overviewBusy = false, m_queryBusy = false;
+    bool m_groundBusy = false;
 };
 
 QString executionText(const QString &state);

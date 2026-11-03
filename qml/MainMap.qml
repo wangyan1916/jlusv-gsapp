@@ -115,6 +115,41 @@ Item {
             }
         }
 
+        MapQuickItem {
+            id: groundStationMarker
+            coordinate: QtPositioning.coordinate(mapBridge.groundStationLat, mapBridge.groundStationLon)
+            anchorPoint.x: 18
+            anchorPoint.y: 18
+            visible: mapBridge.groundStationValid
+            sourceItem: Column {
+                spacing: 3
+                Rectangle {
+                    width: 36
+                    height: 36
+                    radius: 6
+                    color: "#1565C0"
+                    border.color: "white"
+                    border.width: 2
+                    Text {
+                        anchors.centerIn: parent
+                        text: "GS"
+                        color: "white"
+                        font.bold: true
+                        font.pixelSize: 14
+                    }
+                }
+                Text {
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    text: "地面站"
+                    color: "white"
+                    style: Text.Outline
+                    styleColor: "#263238"
+                    font.bold: true
+                    font.pixelSize: 13
+                }
+            }
+        }
+
         // 船只实时位置与航向图标
         MapQuickItem {
             id: boatMarker
@@ -261,12 +296,35 @@ Item {
         }
     }
 
-    // 悬浮居中控制按钮组：独立“居中晏湖”与“定位船只”
+    // 悬浮居中控制按钮组
     Column {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: 20
         spacing: 10
+
+        Rectangle {
+            width: 110
+            height: 38
+            radius: 8
+            color: "#1565C0"
+            border.color: "#FFFFFF"
+            border.width: 1.5
+            opacity: 0.95
+            visible: mapBridge.groundStationValid
+
+            Text {
+                anchors.centerIn: parent
+                text: "定位地面站"
+                color: "white"
+                font.bold: true
+                font.pixelSize: 13
+            }
+            MouseArea {
+                anchors.fill: parent
+                onClicked: map.center = QtPositioning.coordinate(mapBridge.groundStationLat, mapBridge.groundStationLon)
+            }
+        }
 
         // 1. 永久“居中晏湖”按钮（任何时候点击均绝对重置视野至晏湖湖心）
         Rectangle {

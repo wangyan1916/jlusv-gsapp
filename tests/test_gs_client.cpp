@@ -5,6 +5,7 @@
 #include <QPointer>
 #include "network/gs_client.h"
 #include "map/map_bridge.h"
+#include <cmath>
 #include <limits>
 
 using namespace jlusv;
@@ -21,6 +22,11 @@ public:
     QString phase{"UNKNOWN"}, reason{"NONE"}, stage{"RP_RECEIVED"};
     QString transportReason;
     QJsonObject navigationOverrides;
+    QJsonObject receiverSnapshot{{"available", true}, {"gnss", QJsonObject{
+        {"position_available", true}, {"position_valid", true}, {"position_source", "RTCM1005"},
+        {"latitude", 43.82530}, {"longitude", 125.28800}, {"base_position_age_ms", 0}, {"status_age_ms", 0}}}};
+    int receiverCode = 200, receiverQueries = 0, delayReceiver = 0;
+    bool receiverReadOnly = true;
     QVector<QJsonObject> posts;
     QHash<QString, QJsonObject> receipts;
 
@@ -82,6 +88,19 @@ public:
             members.append(member("112233445566"));
             send(socket, overviewCode, {{"gs_uid", gsUid}, {"members", members}}); return;
         }
+        if (path == "/api/v1/gs/gnss/receiver") {
+            ++receiverQueries;
+            receiverReadOnly = receiverReadOnly && method == "GET" && !headers.contains("X-GS-Write:");
+            if (delayReceiver) {
+                QPointer<QTcpSocket> guarded(socket);
+                const auto snapshot = receiverSnapshot;
+                const int code = receiverCode;
+                QTimer::singleShot(delayReceiver, this, [this, guarded, snapshot, code]() {
+                    if (guarded) send(guarded, code, snapshot);
+                });
+            } else send(socket, receiverCode, receiverSnapshot);
+            return;
+        }
         if (method == "POST" && path == "/api/v1/missions/submit") {
             headersOk = headersOk && headers.contains("X-GS-Write: 1") &&
                         headers.contains("Origin: " + url().toUtf8()) && headers.contains("session=loopback-test");
@@ -128,6 +147,148 @@ private:
         QTRY_VERIFY_WITH_TIMEOUT(client.canControl(), 3000);
     }
 private slots:
+    void groundStationReceiverContract_data() {
+        QTest::addColumn<QJsonObject>("snapshot");
+        QTest::addColumn<bool>("valid");
+        Gateway g;
+        const auto base = g.receiverSnapshot;
+        auto row = [&](const char *name, const char *key, QJsonValue value, bool valid) {
+            auto snapshot = base, gnss = base.value("gnss").toObject();
+            gnss.insert(key, value); snapshot.insert("gnss", gnss);
+            QTest::newRow(name) << snapshot << valid;
+        };
+        QTest::newRow("rtcm-origin") << base << true;
+        row("gga-origin", "position_source", "NMEA_GGA", true);
+        row("rtcm-source-expired", "base_position_age_ms", 3000, false);
+        auto survey = base, gnss = base.value("gnss").toObject();
+        gnss.insert("position_source", "SVIN_RESULT"); gnss.insert("base_position_age_ms", 3500);
+        survey.insert("gnss", gnss);
+        QTest::newRow("survey-five-second-window") << survey << true;
+        gnss.insert("base_position_age_ms", 5000); survey.insert("gnss", gnss);
+        QTest::newRow("survey-source-expired") << survey << false;
+        row("rp-invalidates-origin", "position_valid", false, false);
+        row("status-expired", "status_age_ms", 5000, false);
+        row("missing-source-age", "base_position_age_ms", QJsonValue(), false);
+        row("null-latitude", "latitude", QJsonValue(), false);
+        row("text-longitude", "longitude", "125.288", false);
+        row("latitude-out-of-range", "latitude", 91, false);
+        auto unavailable = base; unavailable.insert("available", false);
+        QTest::newRow("receiver-unavailable") << unavailable << false;
+    }
+    void groundStationReceiverContract() {
+        QFETCH(QJsonObject, snapshot); QFETCH(bool, valid);
+        Gateway g; g.receiverSnapshot = snapshot;
+        GsClient c; MapBridge map;
+        connect(&c, &GsClient::telemetryUpdated, &map, &MapBridge::updateTelemetry);
+        connect(&c, &GsClient::groundStationUpdated, &map, &MapBridge::updateGroundStation);
+        c.setBaseUrl(g.url()); c.startPolling(100);
+        QTRY_VERIFY(!c.groundStationPosition().source.isEmpty());
+        QCOMPARE(c.groundStationPosition().valid, valid);
+        QCOMPARE(map.groundStationValid(), valid);
+        QCOMPARE(map.relativePosition().valid, valid);
+        QVERIFY(map.isOnline()); // GS origin validity never changes vessel position validity.
+        QVERIFY(g.receiverReadOnly); QVERIFY(g.posts.isEmpty());
+    }
+    void groundStationFailureDoesNotBlockVesselControl() {
+        Gateway g; g.receiverCode = 404;
+        GsClient c; MapBridge map;
+        connect(&c, &GsClient::telemetryUpdated, &map, &MapBridge::updateTelemetry);
+        connect(&c, &GsClient::groundStationUpdated, &map, &MapBridge::updateGroundStation);
+        connectClient(c, g);
+        QTRY_VERIFY(g.receiverQueries > 0);
+        QVERIFY(c.canPublish(1, 3)); QVERIFY(map.isOnline());
+        QVERIFY(!map.groundStationValid()); QVERIFY(!map.relativePosition().valid);
+        QVERIFY(g.posts.isEmpty());
+    }
+    void groundStationExpiresWhileReceiverRequestStalls() {
+        Gateway g; GsClient c; MapBridge map;
+        connect(&c, &GsClient::telemetryUpdated, &map, &MapBridge::updateTelemetry);
+        connect(&c, &GsClient::groundStationUpdated, &map, &MapBridge::updateGroundStation);
+        c.setBaseUrl(g.url()); c.startPolling(100);
+        QTRY_VERIFY(map.relativePosition().valid);
+        g.delayReceiver = 5000;
+        QTRY_VERIFY_WITH_TIMEOUT(!map.groundStationValid(), 3500);
+        QVERIFY(map.isOnline()); QVERIFY(!map.relativePosition().valid);
+        QVERIFY(c.groundStationPosition().old);
+        c.stopPolling();
+        QVERIFY(!map.groundStationValid()); QVERIFY(!map.isOnline());
+    }
+    void groundStationTransitTimeDoesNotRenewSourceAge() {
+        Gateway g; GsClient c;
+        auto gnss = g.receiverSnapshot.value("gnss").toObject();
+        gnss.insert("base_position_age_ms", 2700); g.receiverSnapshot.insert("gnss", gnss);
+        g.delayReceiver = 450;
+        c.setBaseUrl(g.url()); c.startPolling(100);
+        QTRY_VERIFY(!c.groundStationPosition().source.isEmpty());
+        QVERIFY(c.groundStationPosition().ageMs >= 3000);
+        QVERIFY(!c.groundStationPosition().valid);
+    }
+    void lateGroundStationReplyCannotCrossGateways() {
+        Gateway oldGateway, newGateway;
+        oldGateway.delayReceiver = 900; newGateway.gsUid = "FFEEDDCCBBAA";
+        auto gnss = newGateway.receiverSnapshot.value("gnss").toObject();
+        gnss.insert("latitude", 10); gnss.insert("longitude", 20);
+        newGateway.receiverSnapshot.insert("gnss", gnss);
+        GsClient c; MapBridge map;
+        connect(&c, &GsClient::groundStationUpdated, &map, &MapBridge::updateGroundStation);
+        c.setBaseUrl(oldGateway.url()); c.startPolling(100);
+        QTRY_VERIFY(oldGateway.receiverQueries > 0);
+        c.setBaseUrl(newGateway.url());
+        QVERIFY(!map.groundStationValid());
+        QTRY_VERIFY(map.groundStationValid());
+        QTest::qWait(1000);
+        QCOMPARE(c.groundStationPosition().latDeg, 10.0);
+        QCOMPARE(c.groundStationPosition().lonDeg, 20.0);
+        c.stopPolling(); QVERIFY(!map.groundStationValid());
+    }
+    void relativePositionUsesTrueNorthAndSignedMetres_data() {
+        QTest::addColumn<double>("baseLon"); QTest::addColumn<double>("lat");
+        QTest::addColumn<double>("lon"); QTest::addColumn<double>("distance");
+        QTest::addColumn<double>("bearing");
+        QTest::newRow("north") << 0.0 << 1.0 << 0.0 << 111194.92664455874 << 0.0;
+        QTest::newRow("east") << 0.0 << 0.0 << 1.0 << 111194.92664455874 << 90.0;
+        QTest::newRow("south") << 0.0 << -1.0 << 0.0 << 111194.92664455874 << 180.0;
+        QTest::newRow("west") << 0.0 << 0.0 << -1.0 << 111194.92664455874 << 270.0;
+        QTest::newRow("same-position") << 0.0 << 0.0 << 0.0 << 0.0 << 0.0;
+        QTest::newRow("date-line") << 179.999 << 0.0 << -179.999 << 222.389853289 << 90.0;
+    }
+    void relativePositionUsesTrueNorthAndSignedMetres() {
+        QFETCH(double, baseLon); QFETCH(double, lat); QFETCH(double, lon);
+        QFETCH(double, distance); QFETCH(double, bearing);
+        GroundStationPosition gs; gs.available = gs.valid = true; gs.lonDeg = baseLon;
+        UsvTelemetry vessel; vessel.fresh = vessel.positionValid = true;
+        vessel.latDeg = lat; vessel.lonDeg = lon;
+        MapBridge map; map.setUseGcj02(false);
+        map.updateGroundStation(gs); map.updateTelemetry(vessel);
+        const auto r = map.relativePosition();
+        QVERIFY(map.groundStationValid()); QVERIFY(r.valid);
+        QVERIFY(std::abs(r.distanceM - distance) < .00001);
+        QVERIFY(std::abs(r.bearingDeg - bearing) < .00001);
+        constexpr double rad = 3.14159265358979323846 / 180.0;
+        QVERIFY(std::abs(r.eastM - distance * std::sin(bearing * rad)) < .00001);
+        QVERIFY(std::abs(r.northM - distance * std::cos(bearing * rad)) < .00001);
+        gs.valid = false; map.updateGroundStation(gs);
+        QVERIFY(!map.relativePosition().valid); QVERIFY(map.isOnline());
+    }
+    void mapTransformsBothMarkersWithoutChangingMetres() {
+        GroundStationPosition gs; gs.available = gs.valid = true;
+        gs.latDeg = 43.8253; gs.lonDeg = 125.2880;
+        UsvTelemetry vessel; vessel.fresh = vessel.positionValid = true;
+        vessel.latDeg = 43.82544; vessel.lonDeg = 125.28832;
+        MapBridge map; map.updateGroundStation(gs); map.updateTelemetry(vessel);
+        const auto r = map.relativePosition();
+        const auto display = CoordTransform::wgs84ToGcj02(gs.latDeg, gs.lonDeg);
+        QCOMPARE(map.groundStationLat(), display.first); QCOMPARE(map.groundStationLon(), display.second);
+        QVERIFY(std::abs(map.groundStationLat() - gs.latDeg) > 1e-6);
+        map.setUseGcj02(false);
+        QCOMPARE(map.groundStationLat(), gs.latDeg); QCOMPARE(map.groundStationLon(), gs.lonDeg);
+        QCOMPARE(map.boatLat(), vessel.latDeg); QCOMPARE(map.boatLon(), vessel.lonDeg);
+        QCOMPARE(map.relativePosition().distanceM, r.distanceM);
+        QCOMPARE(map.relativePosition().eastM, r.eastM); QCOMPARE(map.relativePosition().northM, r.northM);
+        vessel.positionValid = false; map.updateTelemetry(vessel);
+        QVERIFY(map.groundStationValid()); QVERIFY(!map.relativePosition().valid);
+    }
+
     void receiverSolutionUsesGatewayEnum_data() {
         QTest::addColumn<int>("code");
         QTest::addColumn<bool>("fresh");

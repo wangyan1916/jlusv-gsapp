@@ -32,6 +32,8 @@ AppWindow::AppWindow(QWidget *parent)
     connect(m_client, &GsClient::connectionStatusChanged, this, &AppWindow::onConnectionStatusChanged);
     connect(m_client, &GsClient::telemetryUpdated, m_bridge, &MapBridge::updateTelemetry);
     connect(m_client, &GsClient::telemetryUpdated, this, &AppWindow::onTelemetryUpdated);
+    connect(m_client, &GsClient::groundStationUpdated, m_bridge, &MapBridge::updateGroundStation);
+    connect(m_bridge, &MapBridge::relativePositionChanged, this, &AppWindow::refreshPositionDetails);
     connect(m_client, &GsClient::missionProgress, this, &AppWindow::logMessage);
     connect(m_client, &GsClient::missionResult, this, &AppWindow::onMissionResult);
     connect(m_client, &GsClient::busyChanged, this, [this]() { refreshControls(); });
@@ -173,6 +175,29 @@ void AppWindow::setupUi() {
     statusLayout->addWidget(new QLabel("电池电压:"), 9, 0);
     statusLayout->addWidget(m_batteryLabel, 9, 1);
     panelLayout->addWidget(statusGroup);
+
+    auto *positionGroup = new QGroupBox("地面站与相对位置 (WGS-84)", panelWidget);
+    auto *positionLayout = new QGridLayout(positionGroup);
+    m_gsPosLabel = new QLabel("等待 GS 坐标", positionGroup);
+    m_gsPosLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_gsPosLabel->setWordWrap(true);
+    m_gsSourceLabel = new QLabel("--", positionGroup);
+    m_gsSourceLabel->setWordWrap(true);
+    m_gsAgeLabel = new QLabel("--", positionGroup);
+    m_relativeDistanceLabel = new QLabel("--", positionGroup);
+    m_relativeOffsetLabel = new QLabel("--", positionGroup);
+    m_relativeOffsetLabel->setToolTip("以 GS 为原点：东 X 为正、西为负；北 Y 为正、南为负。单位：米。");
+    positionLayout->addWidget(new QLabel("GS 纬度 / 经度:"), 0, 0);
+    positionLayout->addWidget(m_gsPosLabel, 0, 1);
+    positionLayout->addWidget(new QLabel("GS 坐标来源:"), 1, 0);
+    positionLayout->addWidget(m_gsSourceLabel, 1, 1);
+    positionLayout->addWidget(new QLabel("GS 坐标源龄:"), 2, 0);
+    positionLayout->addWidget(m_gsAgeLabel, 2, 1);
+    positionLayout->addWidget(new QLabel("距 GS / 真北方位:"), 3, 0);
+    positionLayout->addWidget(m_relativeDistanceLabel, 3, 1);
+    positionLayout->addWidget(new QLabel("东 X / 北 Y:"), 4, 0);
+    positionLayout->addWidget(m_relativeOffsetLabel, 4, 1);
+    panelLayout->addWidget(positionGroup);
 
     // 地图与坐标系设置
     auto *mapSettingGroup = new QGroupBox("底图纠偏设置", panelWidget);
@@ -332,6 +357,27 @@ void AppWindow::onConnectionStatusChanged(bool connected) {
         logMessage("地面站 HTTP 通信断开，正在重试...");
     }
     refreshControls();
+}
+
+void AppWindow::refreshPositionDetails() {
+    const auto &p = m_bridge->groundStationPosition();
+    m_gsPosLabel->setText(p.available
+        ? QString("%1, %2%3").arg(p.latDeg, 0, 'f', 7).arg(p.lonDeg, 0, 'f', 7)
+            .arg(p.old ? "（旧值）" : "") : "无可用 GS 坐标");
+    QString source = p.source;
+    if (source == "RTCM1005") source = "RTCM 1005 基站坐标";
+    else if (source == "NMEA_GGA") source = "NMEA GGA";
+    else if (source == "SVIN_ESTIMATE") source = "自定位暂估";
+    else if (source == "SVIN_RESULT") source = "自定位结果";
+    else if (source == "FIXED_REFERENCE") source = "固定参考坐标";
+    else if (source.isEmpty() || source == "UNKNOWN") source = "未知";
+    m_gsSourceLabel->setText(source + " · " + (!p.valid ? "无效 / 已过期" : p.old ? "旧参考" : p.estimated ? "暂估" : "有效"));
+    m_gsAgeLabel->setText(p.ageMs >= 0 ? QString("%1 s").arg(p.ageMs / 1000.0, 0, 'f', 2) : "未知");
+    const auto &r = m_bridge->relativePosition();
+    m_relativeDistanceLabel->setText(r.valid
+        ? QString("%1 m / %2°").arg(r.distanceM, 0, 'f', 2).arg(r.bearingDeg, 0, 'f', 1) : "—");
+    m_relativeOffsetLabel->setText(r.valid
+        ? QString("%1 m / %2 m").arg(r.eastM, 0, 'f', 2).arg(r.northM, 0, 'f', 2) : "—");
 }
 
 void AppWindow::onTelemetryUpdated(const UsvTelemetry &t) {

@@ -112,6 +112,10 @@ void GsClient::invalidateTelemetry() {
 void GsClient::resetContext(const QString &reason) {
     ++m_context;
     m_overviewBusy = false;
+    m_groundBusy = false;
+    m_groundAt = m_groundRequestedAt = -10000;
+    m_groundSnapshot = {};
+    updateGroundStationPosition();
     if (!m_operation.request.isEmpty()) emit missionResult(false, reason + "；此前操作结果须核对船端实际状态");
     clearOperation();
     invalidateTelemetry();
@@ -206,6 +210,8 @@ void GsClient::stopPolling() {
 void GsClient::pollOverview() {
     // Expire locally even when a stalled HTTP request has not finished yet.
     if (m_clock.elapsed() - m_overviewAt > 2500 && m_latestTelemetry.fresh) invalidateTelemetry();
+    updateGroundStationPosition();
+    pollGroundStation();
     if (m_overviewBusy) return;
     m_overviewBusy = true;
     const quint64 context = m_context;
@@ -242,7 +248,51 @@ void GsClient::pollOverview() {
         }
         updateTelemetry();
         emit fleetUpdated(m_members);
+        pollGroundStation();
     });
+}
+
+void GsClient::pollGroundStation() {
+    if (m_gsUid.isEmpty() || m_groundBusy || m_clock.elapsed() - m_groundRequestedAt < 1000) return;
+    m_groundBusy = true;
+    const quint64 context = m_context;
+    const qint64 requestedAt = m_groundRequestedAt = m_clock.elapsed();
+    auto *reply = m_nam.get(request("/api/v1/gs/gnss/receiver"));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, context, requestedAt]() {
+        reply->deleteLater();
+        if (context != m_context) return;
+        m_groundBusy = false;
+        QJsonParseError error;
+        const auto doc = QJsonDocument::fromJson(reply->readAll(), &error);
+        m_groundSnapshot = reply->error() == QNetworkReply::NoError && error.error == QJsonParseError::NoError
+            ? doc.object() : QJsonObject{};
+        // Include HTTP transit time instead of renewing a cached source's age.
+        m_groundAt = requestedAt;
+        updateGroundStationPosition();
+    });
+}
+
+void GsClient::updateGroundStationPosition() {
+    const auto gnss = m_groundSnapshot.value("gnss").toObject();
+    const qint64 elapsed = qMax<qint64>(0, m_clock.elapsed() - m_groundAt);
+    GroundStationPosition p;
+    p.available = gnss.value("position_available").toBool() &&
+                  inRange(gnss, "latitude", -90, 90) && inRange(gnss, "longitude", -180, 180);
+    p.latDeg = gnss.value("latitude").toDouble(); p.lonDeg = gnss.value("longitude").toDouble();
+    p.source = gnss.value("position_source").toString();
+    p.ageMs = telemetryAge(gnss, "base_position_age_ms");
+    if (p.ageMs >= 0) p.ageMs += elapsed;
+    const qint64 statusAge = telemetryAge(gnss, "status_age_ms");
+    const qint64 ttl = p.source == "RTCM1005" || p.source == "NMEA_GGA" ? 3000 : 5000;
+    // position_valid already includes the GS RP runtime freshness check in the
+    // receiver endpoint. Match the GS card's additional source/status age limits.
+    p.valid = p.available && m_groundSnapshot.value("available").toBool() &&
+              gnss.value("position_valid").toBool() && elapsed <= 2500 &&
+              statusAge >= 0 && statusAge + elapsed < 5000 && p.ageMs >= 0 && p.ageMs < ttl;
+    p.estimated = gnss.value("position_estimated").toBool();
+    p.old = p.available && (!p.valid || gnss.value("position_old").toBool());
+    m_groundPosition = p;
+    emit groundStationUpdated(m_groundPosition);
 }
 
 void GsClient::updateTelemetry() {

@@ -37,6 +37,39 @@ void MapBridge::updateDisplayPosition() {
         m_displayLon = m_rawLon;
     }
     emit boatPositionChanged();
+    m_groundDisplayLat = m_groundPosition.latDeg;
+    m_groundDisplayLon = m_groundPosition.lonDeg;
+    if (m_useGcj02 && m_groundPosition.available) {
+        const auto display = CoordTransform::wgs84ToGcj02(m_groundPosition.latDeg, m_groundPosition.lonDeg);
+        m_groundDisplayLat = display.first;
+        m_groundDisplayLon = display.second;
+    }
+    emit groundStationPositionChanged();
+}
+
+void MapBridge::updateGroundStation(const GroundStationPosition &position) {
+    m_groundPosition = position;
+    updateDisplayPosition();
+    updateRelativePosition();
+}
+
+void MapBridge::updateRelativePosition() {
+    m_relativePosition = {};
+    if (m_online && m_groundPosition.valid) {
+        // Same WGS-84 spherical distance and true-north bearing as the GS card.
+        // GCJ-02 conversion is confined to display coordinates.
+        constexpr double rad = 3.14159265358979323846 / 180.0;
+        const double a = m_groundPosition.latDeg * rad, b = m_rawLat * rad;
+        const double dl = (m_rawLon - m_groundPosition.lonDeg) * rad, dp = b - a;
+        const double h = std::pow(std::sin(dp / 2), 2) +
+                         std::cos(a) * std::cos(b) * std::pow(std::sin(dl / 2), 2);
+        const double distance = 12742000.0 * std::asin(std::sqrt(qBound(0.0, h, 1.0)));
+        const double bearing = std::fmod(std::atan2(std::sin(dl) * std::cos(b),
+            std::cos(a) * std::sin(b) - std::sin(a) * std::cos(b) * std::cos(dl)) / rad + 360.0, 360.0);
+        m_relativePosition = {true, distance, bearing, distance * std::sin(bearing * rad),
+                             distance * std::cos(bearing * rad)};
+    }
+    emit relativePositionChanged();
 }
 
 void MapBridge::updateTelemetry(const UsvTelemetry &telemetry) {
@@ -73,6 +106,7 @@ void MapBridge::updateTelemetry(const UsvTelemetry &telemetry) {
     else if (telemetry.headingReference == "MAGNETIC") m_headingSourceText += "（磁北）";
 
     updateDisplayPosition();
+    updateRelativePosition();
     emit boatHeadingChanged();
     emit boatTelemetryChanged();
 }

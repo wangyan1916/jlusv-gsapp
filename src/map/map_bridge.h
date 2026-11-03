@@ -9,6 +9,11 @@
 
 namespace jlusv {
 
+struct RelativePosition {
+    bool valid = false;
+    double distanceM = 0.0, bearingDeg = 0.0, eastM = 0.0, northM = 0.0;
+};
+
 class MapBridge : public QObject {
     Q_OBJECT
     Q_PROPERTY(double boatLat READ boatLat NOTIFY boatPositionChanged)
@@ -18,6 +23,9 @@ class MapBridge : public QObject {
     Q_PROPERTY(double boatSpeed READ boatSpeed NOTIFY boatTelemetryChanged)
     Q_PROPERTY(QString rtkStateText READ rtkStateText NOTIFY boatTelemetryChanged)
     Q_PROPERTY(bool isOnline READ isOnline NOTIFY boatTelemetryChanged)
+    Q_PROPERTY(double groundStationLat READ groundStationLat NOTIFY groundStationPositionChanged)
+    Q_PROPERTY(double groundStationLon READ groundStationLon NOTIFY groundStationPositionChanged)
+    Q_PROPERTY(bool groundStationValid READ groundStationValid NOTIFY groundStationPositionChanged)
     Q_PROPERTY(bool useGcj02 READ useGcj02 WRITE setUseGcj02 NOTIFY useGcj02Changed)
     Q_PROPERTY(QVariantList waypointsQml READ waypointsQml NOTIFY waypointsChanged)
     Q_PROPERTY(double defaultSpeed READ defaultSpeed WRITE setDefaultSpeed NOTIFY defaultSpeedChanged)
@@ -34,6 +42,11 @@ public:
     QString positionSourceText() const { return m_positionSourceText; }
     QString headingSourceText() const { return m_headingSourceText; }
     bool isOnline() const { return m_online; }
+    double groundStationLat() const { return m_groundDisplayLat; }
+    double groundStationLon() const { return m_groundDisplayLon; }
+    bool groundStationValid() const { return m_groundPosition.valid; }
+    const GroundStationPosition &groundStationPosition() const { return m_groundPosition; }
+    const RelativePosition &relativePosition() const { return m_relativePosition; }
     bool useGcj02() const { return m_useGcj02; }
     double defaultSpeed() const { return m_defaultSpeed; }
     void setDefaultSpeed(double speed);
@@ -51,11 +64,14 @@ public:
 
 public slots:
     void updateTelemetry(const UsvTelemetry &telemetry);
+    void updateGroundStation(const GroundStationPosition &position);
 
 signals:
     void boatPositionChanged();
     void boatHeadingChanged();
     void boatTelemetryChanged();
+    void groundStationPositionChanged();
+    void relativePositionChanged();
     void useGcj02Changed();
     void waypointsChanged();
     void defaultSpeedChanged();
@@ -65,6 +81,9 @@ private:
     double m_rawLon = 0.0;
     double m_displayLat = 0.0;
     double m_displayLon = 0.0;
+    double m_groundDisplayLat = 0.0, m_groundDisplayLon = 0.0;
+    GroundStationPosition m_groundPosition;
+    RelativePosition m_relativePosition;
     double m_heading = 0.0;
     double m_speed = 0.0;
     QString m_rtkText{"未连接"};
@@ -76,6 +95,7 @@ private:
 
     QVector<Waypoint> m_waypoints; // 存储真实 WGS-84 经纬度
     void updateDisplayPosition();
+    void updateRelativePosition();
 };
 
 } // namespace jlusv
