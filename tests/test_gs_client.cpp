@@ -342,6 +342,63 @@ private slots:
         QVERIFY(map.groundStationValid()); QVERIFY(!map.relativePosition().valid);
     }
 
+    void manualGroundStationPreservesMetresAndRoundtripsWaypoints_data() {
+        QTest::addColumn<bool>("gcj");
+        QTest::newRow("wgs-map") << false;
+        QTest::newRow("gcj-map") << true;
+    }
+    void manualGroundStationPreservesMetresAndRoundtripsWaypoints() {
+        QFETCH(bool,gcj);
+        MapBridge map;map.setUseGcj02(gcj);
+        GroundStationPosition gs;gs.available=gs.valid=true;gs.latDeg=43.8253;gs.lonDeg=125.2880;
+        UsvTelemetry vessel;vessel.fresh=vessel.positionValid=true;vessel.latDeg=43.82544;vessel.lonDeg=125.28832;
+        map.updateGroundStation(gs);map.updateTelemetry(vessel);
+        map.addRawWaypoint(vessel.latDeg,vessel.lonDeg,1.7);
+        const auto metres=map.relativePosition();
+        const QGeoCoordinate anchor(43.8262,125.2891),rawGs(gs.latDeg,gs.lonDeg),rawBoat(vessel.latDeg,vessel.lonDeg);
+        auto click=std::make_pair(anchor.latitude(),anchor.longitude());
+        if(gcj)click=CoordTransform::wgs84ToGcj02(click.first,click.second);
+        QVERIFY(map.setGroundStationFromMap(click.first,click.second));QVERIFY(map.manualGroundStation());
+        QCOMPARE(map.rawWaypoints().size(),1); // Picking GS never adds a waypoint.
+        QCOMPARE(map.relativePosition().eastM,metres.eastM);QCOMPARE(map.relativePosition().northM,metres.northM);
+        QCOMPARE(map.relativePosition().distanceM,metres.distanceM);
+        const auto expected=anchor.atDistanceAndAzimuth(rawGs.distanceTo(rawBoat),rawGs.azimuthTo(rawBoat));
+        QGeoCoordinate actual(map.boatLat(),map.boatLon());
+        if(gcj){const auto w=CoordTransform::gcj02ToWgs84(actual.latitude(),actual.longitude());actual=QGeoCoordinate(w.first,w.second);}
+        QVERIFY(actual.distanceTo(expected)<.01);
+        const auto shown=map.waypointsQml().first().value<QGeoCoordinate>();
+        QCOMPARE(shown.latitude(),map.boatLat());QCOMPARE(shown.longitude(),map.boatLon());
+        map.addWaypointFromMap(shown.latitude(),shown.longitude(),2.1);
+        QCOMPARE(map.rawWaypoints().size(),2);
+        QVERIFY(QGeoCoordinate(map.rawWaypoints().last().latDeg,map.rawWaypoints().last().lonDeg).distanceTo(rawBoat)<.01);
+        QCOMPARE(map.rawWaypoints().first().speedMps,1.7);QCOMPARE(map.rawWaypoints().last().speedMps,2.1);
+        const auto storedAnchor=map.groundStationAnchor();
+        map.updateGroundStation(gs);QCOMPARE(map.groundStationAnchor(),storedAnchor); // Polling preserves the manual anchor.
+        gs.valid=false;map.updateGroundStation(gs);
+        QVERIFY(map.groundStationValid());QVERIFY(!map.groundReferenceValid());
+        QVERIFY(!map.relativePosition().valid);QVERIFY(!map.isOnline());
+        map.addWaypointFromMap(shown.latitude(),shown.longitude());QCOMPARE(map.rawWaypoints().size(),2);
+        QVERIFY(!map.setGroundStationFromMap(click.first,click.second));
+        gs.valid=true;map.updateGroundStation(gs);QVERIFY(map.isOnline());
+        map.useAutomaticGroundStation();QVERIFY(!map.manualGroundStation());
+        QCOMPARE(map.relativePosition().eastM,metres.eastM);
+        map.setUseGcj02(false);QCOMPARE(map.boatLat(),vessel.latDeg);QCOMPARE(map.boatLon(),vessel.lonDeg);
+    }
+    void bodyHeadingRemainsSeparateFromCourse() {
+        Gateway g;GsClient c;MapBridge map;
+        g.navigationOverrides={{"heading_deg",230.0},{"heading_valid",true},{"heading_age_ms",20},
+            {"heading_source","CALIBRATED_MAGNETOMETER"},{"heading_reference","MAGNETIC"},
+            {"cog_deg",15.0},{"sog_mps",1.0},{"position_source","GNSS"},{"rtk_state",3}};
+        connect(&c,&GsClient::telemetryUpdated,&map,&MapBridge::updateTelemetry);connectClient(c,g);
+        QVERIFY(c.latestTelemetry().headingValid);QCOMPARE(map.boatHeading(),230.0);
+        QCOMPARE(c.latestTelemetry().cogDeg,15.0);QCOMPARE(map.positionSourceText(),QString("接收机定位（含 RTK）"));
+        g.navigationOverrides.insert("sog_mps",0.0);
+        QTRY_COMPARE(c.latestTelemetry().sogMps,0.0);QCOMPARE(map.boatHeading(),230.0);
+        QCOMPARE(map.rtkStateText(),QString("RTK FIXED (固定解)"));
+        g.navigationOverrides.insert("heading_valid",false);
+        QTRY_VERIFY(!map.boatHeadingValid());QVERIFY(c.latestTelemetry().cogValid);
+        QVERIFY(g.posts.isEmpty());
+    }
     void receiverSolutionUsesGatewayEnum_data() {
         QTest::addColumn<int>("code");
         QTest::addColumn<bool>("fresh");
@@ -401,10 +458,10 @@ private slots:
             {"diff_age_ms", 0}, {"diff_age_state", "VALID"}};
         connect(&c, &GsClient::telemetryUpdated, &map, &MapBridge::updateTelemetry);
         connectClient(c, g);
-        QVERIFY(c.latestTelemetry().headingValid); QVERIFY(c.latestTelemetry().cogValid);
+        QVERIFY(!c.latestTelemetry().headingValid); QVERIFY(c.latestTelemetry().cogValid);
         QVERIFY(c.latestTelemetry().speedValid); QCOMPARE(c.latestTelemetry().diffAgeMs, qint64(0));
-        QVERIFY(map.boatHeadingValid()); QCOMPARE(map.boatHeading(), 0.0);
-        QCOMPARE(map.headingSourceText(), QString("GPS 对地航迹向 COG（真北）"));
+        QVERIFY(!map.boatHeadingValid()); QCOMPARE(map.boatHeading(), 0.0);
+        QCOMPARE(map.headingSourceText(), QString("艏向未独立上报（真北）"));
         QCOMPARE(map.positionSourceText(), QString("来源未提供"));
         g.navigationOverrides.insert("position_source", "INERTIAL");
         g.navigationOverrides.insert("drift_ms", 1200);

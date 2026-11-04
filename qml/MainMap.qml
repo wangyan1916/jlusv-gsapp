@@ -12,6 +12,7 @@ Item {
     // 15.0 ~ 19.0: 物理高清晰度卫星切片
     // 19.0 ~ 22.0: 硬件级无级平滑放大图片 (保证绝不黑屏、绝不出现“无卫星图”提示，图片可深度放大)
     property real currentZoom: 18.5
+    property bool pickingGroundStation: false
     readonly property real minZoom: 15.0
     readonly property real maxZoom: 22.0
 
@@ -229,7 +230,12 @@ Item {
                 if (!isDragging && mouse.button === Qt.LeftButton) {
                     var coord = map.toCoordinate(Qt.point(mouse.x, mouse.y));
                     if (coord.isValid) {
-                        mapBridge.addWaypointFromMap(coord.latitude, coord.longitude, mapBridge.defaultSpeed);
+                        if (root.pickingGroundStation) {
+                            if (mapBridge.setGroundStationFromMap(coord.latitude, coord.longitude))
+                                root.pickingGroundStation = false;
+                        } else {
+                            mapBridge.addWaypointFromMap(coord.latitude, coord.longitude, mapBridge.defaultSpeed);
+                        }
                     }
                 }
                 isDragging = false;
@@ -296,12 +302,51 @@ Item {
         }
     }
 
+    Rectangle {
+        anchors.top: parent.top
+        anchors.horizontalCenter: parent.horizontalCenter
+        anchors.topMargin: 14
+        width: Math.min(parent.width - 100, 440)
+        height: 48
+        radius: 6
+        color: "#E65100"
+        visible: root.pickingGroundStation
+        Text {
+            anchors.fill: parent
+            anchors.margins: 6
+            text: "点击地图设置 GS 实际位置；船位与航点同步校正\n原始相对米数保持。再次点击“取消手点”可退出。"
+            color: "white"
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            wrapMode: Text.Wrap
+            font.pixelSize: 12
+        }
+    }
+
     // 悬浮居中控制按钮组
     Column {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.margins: 20
         spacing: 10
+
+        Button {
+            width: 110
+            height: 38
+            text: root.pickingGroundStation ? "取消手点" : "地图手点 GS"
+            enabled: mapBridge.groundReferenceValid || root.pickingGroundStation
+            onClicked: root.pickingGroundStation = !root.pickingGroundStation
+        }
+        Button {
+            width: 110
+            height: 38
+            text: "GS 恢复自动"
+            enabled: mapBridge.manualGroundStation
+            onClicked: {
+                root.pickingGroundStation = false;
+                mapBridge.useAutomaticGroundStation();
+            }
+        }
 
         Rectangle {
             width: 110

@@ -335,6 +335,7 @@ void GsClient::updateTelemetry() {
                      (!nav.contains("heading_age_ms") || (t.headingAgeMs >= 0 && t.headingAgeMs <= 3000));
     t.headingDeg = nav.value("heading_deg").toDouble();
     t.headingSource = nav.value("heading_source").toString();
+    t.headingValid = t.headingValid && t.headingSource == "CALIBRATED_MAGNETOMETER";
     t.headingReference = nav.value("heading_reference").toString();
     t.headingReason = nav.value("heading_reason").toString();
     t.speedValid = navFresh && inRange(nav, "sog_mps", 0, 655.34);

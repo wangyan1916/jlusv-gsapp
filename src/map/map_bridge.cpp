@@ -28,19 +28,17 @@ void MapBridge::updateDisplayPosition() {
     if (m_rawLat == 0.0 && m_rawLon == 0.0) {
         m_displayLat = 0.0;
         m_displayLon = 0.0;
-    } else if (m_useGcj02) {
-        auto [gcjLat, gcjLon] = CoordTransform::wgs84ToGcj02(m_rawLat, m_rawLon);
-        m_displayLat = gcjLat;
-        m_displayLon = gcjLon;
     } else {
-        m_displayLat = m_rawLat;
-        m_displayLon = m_rawLon;
+        const auto display = displayCoordinate(m_rawLat,m_rawLon);
+        m_displayLat = display.latitude();
+        m_displayLon = display.longitude();
     }
     emit boatPositionChanged();
-    m_groundDisplayLat = m_groundPosition.latDeg;
-    m_groundDisplayLon = m_groundPosition.lonDeg;
-    if (m_useGcj02 && m_groundPosition.available) {
-        const auto display = CoordTransform::wgs84ToGcj02(m_groundPosition.latDeg, m_groundPosition.lonDeg);
+    const auto anchor = groundStationAnchor();
+    m_groundDisplayLat = anchor.latitude();
+    m_groundDisplayLon = anchor.longitude();
+    if (m_useGcj02 && (m_manualGroundStation || m_groundPosition.available)) {
+        const auto display = CoordTransform::wgs84ToGcj02(anchor.latitude(),anchor.longitude());
         m_groundDisplayLat = display.first;
         m_groundDisplayLon = display.second;
     }
@@ -51,6 +49,53 @@ void MapBridge::updateGroundStation(const GroundStationPosition &position) {
     m_groundPosition = position;
     updateDisplayPosition();
     updateRelativePosition();
+    emit boatTelemetryChanged();
+    emit waypointsChanged();
+}
+
+QGeoCoordinate MapBridge::displayCoordinate(double lat,double lon) const {
+    QGeoCoordinate point(lat,lon);
+    if (m_manualGroundStation && m_groundPosition.available) {
+        const QGeoCoordinate reference(m_groundPosition.latDeg,m_groundPosition.lonDeg);
+        point = m_manualAnchor.atDistanceAndAzimuth(reference.distanceTo(point),reference.azimuthTo(point));
+    }
+    if (m_useGcj02) {
+        const auto gcj = CoordTransform::wgs84ToGcj02(point.latitude(),point.longitude());
+        point = QGeoCoordinate(gcj.first,gcj.second);
+    }
+    return point;
+}
+
+QGeoCoordinate MapBridge::rawCoordinate(double lat,double lon) const {
+    if (m_useGcj02) {
+        const auto wgs = CoordTransform::gcj02ToWgs84(lat,lon);
+        lat=wgs.first;lon=wgs.second;
+    }
+    QGeoCoordinate point(lat,lon);
+    if (m_manualGroundStation && m_groundPosition.available) {
+        const QGeoCoordinate reference(m_groundPosition.latDeg,m_groundPosition.lonDeg);
+        point = reference.atDistanceAndAzimuth(m_manualAnchor.distanceTo(point),m_manualAnchor.azimuthTo(point));
+    }
+    return point;
+}
+
+bool MapBridge::setGroundStationFromMap(double lat,double lon) {
+    if (!m_groundPosition.valid || !QGeoCoordinate(lat,lon).isValid()) return false;
+    if (m_useGcj02) {
+        const auto wgs=CoordTransform::gcj02ToWgs84(lat,lon);
+        lat=wgs.first;lon=wgs.second;
+    }
+    m_manualAnchor=QGeoCoordinate(lat,lon);
+    m_manualGroundStation=true;
+    updateDisplayPosition();updateRelativePosition();
+    emit boatTelemetryChanged();emit waypointsChanged();
+    return true;
+}
+
+void MapBridge::useAutomaticGroundStation() {
+    m_manualGroundStation=false;
+    updateDisplayPosition();updateRelativePosition();
+    emit boatTelemetryChanged();emit waypointsChanged();
 }
 
 void MapBridge::updateRelativePosition() {
@@ -76,7 +121,7 @@ void MapBridge::updateTelemetry(const UsvTelemetry &telemetry) {
     m_rawLat = telemetry.latDeg;
     m_rawLon = telemetry.lonDeg;
     m_heading = telemetry.headingDeg;
-    m_headingValid = telemetry.fresh && telemetry.headingValid;
+    m_headingValid = telemetry.fresh && telemetry.headingValid && telemetry.headingSource == "CALIBRATED_MAGNETOMETER";
     m_speed = telemetry.sogMps;
     m_online = telemetry.fresh && telemetry.positionValid;
 
@@ -91,7 +136,7 @@ void MapBridge::updateTelemetry(const UsvTelemetry &telemetry) {
     else if (!telemetry.fresh) m_rtkText = "解状态过期";
 
     m_positionSourceText = telemetry.positionSource.isEmpty() ? "来源未提供" : "未知来源";
-    if (telemetry.positionSource == "GNSS") m_positionSourceText = "GNSS";
+    if (telemetry.positionSource == "GNSS") m_positionSourceText = "接收机定位（含 RTK）";
     else if (telemetry.positionSource == "TRUSTED_RTK") m_positionSourceText = "可信 RTK 位置";
     else if (telemetry.positionSource == "INERTIAL") {
         m_positionSourceText = "惯性推算（非 FIXED）";
@@ -100,7 +145,7 @@ void MapBridge::updateTelemetry(const UsvTelemetry &telemetry) {
     if (!m_online) m_positionSourceText = "无有效位置 · " + m_positionSourceText;
 
     m_headingSourceText = "来源未提供";
-    if (telemetry.headingSource == "GNSS") m_headingSourceText = "GPS 对地航迹向 COG";
+    if (telemetry.headingSource == "GNSS") m_headingSourceText = "艏向未独立上报";
     else if (telemetry.headingSource == "CALIBRATED_MAGNETOMETER") m_headingSourceText = "磁罗盘艏向";
     if (telemetry.headingReference == "TRUE") m_headingSourceText += "（真北）";
     else if (telemetry.headingReference == "MAGNETIC") m_headingSourceText += "（磁北）";
@@ -112,17 +157,11 @@ void MapBridge::updateTelemetry(const UsvTelemetry &telemetry) {
 }
 
 void MapBridge::addWaypointFromMap(double lat, double lon, double speed) {
-    if (m_waypoints.size() >= 16) return;
+    if (m_waypoints.size() >= 16 || (m_manualGroundStation && !m_groundPosition.valid)) return;
     Waypoint wp;
-    if (m_useGcj02) {
-        // 地图上点点的是 GCJ-02 屏幕坐标，还原为真实 WGS-84 坐标
-        auto [wgsLat, wgsLon] = CoordTransform::gcj02ToWgs84(lat, lon);
-        wp.latDeg = wgsLat;
-        wp.lonDeg = wgsLon;
-    } else {
-        wp.latDeg = lat;
-        wp.lonDeg = lon;
-    }
+    const auto raw=rawCoordinate(lat,lon);
+    if (!raw.isValid() || !std::isfinite(speed) || speed<0 || speed>3) return;
+    wp.latDeg=raw.latitude();wp.lonDeg=raw.longitude();
     wp.speedMps = speed;
     m_waypoints.append(wp);
     emit waypointsChanged();
@@ -157,14 +196,7 @@ void MapBridge::removeLastWaypoint() {
 QVariantList MapBridge::waypointsQml() const {
     QVariantList list;
     for (const auto &wp : m_waypoints) {
-        double dLat = wp.latDeg;
-        double dLon = wp.lonDeg;
-        if (m_useGcj02) {
-            auto [gcjLat, gcjLon] = CoordTransform::wgs84ToGcj02(wp.latDeg, wp.lonDeg);
-            dLat = gcjLat;
-            dLon = gcjLon;
-        }
-        list.append(QVariant::fromValue(QGeoCoordinate(dLat, dLon)));
+        list.append(QVariant::fromValue(displayCoordinate(wp.latDeg,wp.lonDeg)));
     }
     return list;
 }

@@ -26,6 +26,8 @@ class MapBridge : public QObject {
     Q_PROPERTY(double groundStationLat READ groundStationLat NOTIFY groundStationPositionChanged)
     Q_PROPERTY(double groundStationLon READ groundStationLon NOTIFY groundStationPositionChanged)
     Q_PROPERTY(bool groundStationValid READ groundStationValid NOTIFY groundStationPositionChanged)
+    Q_PROPERTY(bool manualGroundStation READ manualGroundStation NOTIFY groundStationPositionChanged)
+    Q_PROPERTY(bool groundReferenceValid READ groundReferenceValid NOTIFY groundStationPositionChanged)
     Q_PROPERTY(bool useGcj02 READ useGcj02 WRITE setUseGcj02 NOTIFY useGcj02Changed)
     Q_PROPERTY(QVariantList waypointsQml READ waypointsQml NOTIFY waypointsChanged)
     Q_PROPERTY(double defaultSpeed READ defaultSpeed WRITE setDefaultSpeed NOTIFY defaultSpeedChanged)
@@ -41,10 +43,13 @@ public:
     QString rtkStateText() const { return m_rtkText; }
     QString positionSourceText() const { return m_positionSourceText; }
     QString headingSourceText() const { return m_headingSourceText; }
-    bool isOnline() const { return m_online; }
+    bool isOnline() const { return m_online && (!m_manualGroundStation || m_groundPosition.valid); }
     double groundStationLat() const { return m_groundDisplayLat; }
     double groundStationLon() const { return m_groundDisplayLon; }
-    bool groundStationValid() const { return m_groundPosition.valid; }
+    bool groundStationValid() const { return m_manualGroundStation || m_groundPosition.valid; }
+    bool manualGroundStation() const { return m_manualGroundStation; }
+    bool groundReferenceValid() const { return m_groundPosition.valid; }
+    QGeoCoordinate groundStationAnchor() const { return m_manualGroundStation ? m_manualAnchor : QGeoCoordinate(m_groundPosition.latDeg,m_groundPosition.lonDeg); }
     const GroundStationPosition &groundStationPosition() const { return m_groundPosition; }
     const RelativePosition &relativePosition() const { return m_relativePosition; }
     bool useGcj02() const { return m_useGcj02; }
@@ -59,6 +64,8 @@ public:
     void addRawWaypoint(double wgsLat, double wgsLon, double speed = 1.2);
 
     Q_INVOKABLE void addWaypointFromMap(double lat, double lon, double speed = 1.2);
+    Q_INVOKABLE bool setGroundStationFromMap(double lat, double lon);
+    Q_INVOKABLE void useAutomaticGroundStation();
     Q_INVOKABLE void clearWaypoints();
     Q_INVOKABLE void removeLastWaypoint();
 
@@ -83,6 +90,8 @@ private:
     double m_displayLon = 0.0;
     double m_groundDisplayLat = 0.0, m_groundDisplayLon = 0.0;
     GroundStationPosition m_groundPosition;
+    bool m_manualGroundStation = false;
+    QGeoCoordinate m_manualAnchor;
     RelativePosition m_relativePosition;
     double m_heading = 0.0;
     double m_speed = 0.0;
@@ -96,6 +105,8 @@ private:
     QVector<Waypoint> m_waypoints; // 存储真实 WGS-84 经纬度
     void updateDisplayPosition();
     void updateRelativePosition();
+    QGeoCoordinate displayCoordinate(double lat, double lon) const;
+    QGeoCoordinate rawCoordinate(double lat, double lon) const;
 };
 
 } // namespace jlusv

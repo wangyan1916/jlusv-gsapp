@@ -139,7 +139,7 @@ void AppWindow::setupUi() {
     });
 
     // 船只状态卡片
-    auto *statusGroup = new QGroupBox("船端遥测数据 (WGS-84)", panelWidget);
+    auto *statusGroup = new QGroupBox("船端遥测数据 · GS 相对米制", panelWidget);
     auto *statusLayout = new QGridLayout(statusGroup);
     m_uidLabel = new QLabel("--", statusGroup);
     m_modeLabel = new QLabel("--", statusGroup);
@@ -161,13 +161,13 @@ void AppWindow::setupUi() {
     statusLayout->addWidget(new QLabel("接收机解状态:"), 2, 0);
     m_rtkLabel->setToolTip("接口状态：1=非RTK，2=FLOAT，3=FIXED。解状态与当前使用的位置来源分别显示。");
     statusLayout->addWidget(m_rtkLabel, 2, 1);
-    statusLayout->addWidget(new QLabel("经纬度:"), 3, 0);
+    statusLayout->addWidget(new QLabel("相对 GS 东 / 北:"), 3, 0);
     statusLayout->addWidget(m_posLabel, 3, 1);
     statusLayout->addWidget(new QLabel("位置来源:"), 4, 0);
     statusLayout->addWidget(m_positionSourceLabel, 4, 1);
     statusLayout->addWidget(new QLabel("接收机差分龄期:"), 5, 0);
     statusLayout->addWidget(m_diffAgeLabel, 5, 1);
-    statusLayout->addWidget(new QLabel("控制方向:"), 6, 0);
+    statusLayout->addWidget(new QLabel("艏向:"), 6, 0);
     statusLayout->addWidget(m_headingLabel, 6, 1);
     statusLayout->addWidget(new QLabel("对地航迹向 COG:"), 7, 0);
     statusLayout->addWidget(m_cogLabel, 7, 1);
@@ -177,7 +177,7 @@ void AppWindow::setupUi() {
     statusLayout->addWidget(m_batteryLabel, 9, 1);
     panelLayout->addWidget(statusGroup);
 
-    auto *positionGroup = new QGroupBox("地面站与相对位置 (WGS-84)", panelWidget);
+    auto *positionGroup = new QGroupBox("GS 原点与相对位置", panelWidget);
     auto *positionLayout = new QGridLayout(positionGroup);
     m_gsPosLabel = new QLabel("等待 GS 坐标", positionGroup);
     m_gsPosLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
@@ -192,7 +192,7 @@ void AppWindow::setupUi() {
     positionLayout->addWidget(m_gsPosLabel, 0, 1);
     positionLayout->addWidget(new QLabel("GS 坐标来源:"), 1, 0);
     positionLayout->addWidget(m_gsSourceLabel, 1, 1);
-    positionLayout->addWidget(new QLabel("GS 坐标源龄:"), 2, 0);
+    positionLayout->addWidget(new QLabel("接收机参考源龄:"), 2, 0);
     positionLayout->addWidget(m_gsAgeLabel, 2, 1);
     positionLayout->addWidget(new QLabel("距 GS / 真北方位:"), 3, 0);
     positionLayout->addWidget(m_relativeDistanceLabel, 3, 1);
@@ -373,6 +373,7 @@ void AppWindow::logMessage(const QString &msg) {
 }
 
 void AppWindow::onConnectClicked() {
+    m_bridge->useAutomaticGroundStation();
     m_client->setBaseUrl(m_ipEdit->text());
     m_client->setPassword(m_pwdEdit->text());
     m_client->startPolling(500);
@@ -401,9 +402,10 @@ void AppWindow::onConnectionStatusChanged(bool connected) {
 
 void AppWindow::refreshPositionDetails() {
     const auto &p = m_bridge->groundStationPosition();
-    m_gsPosLabel->setText(p.available
-        ? QString("%1, %2%3").arg(p.latDeg, 0, 'f', 7).arg(p.lonDeg, 0, 'f', 7)
-            .arg(p.old ? "（旧值）" : "") : "无可用 GS 坐标");
+    const auto anchor=m_bridge->groundStationAnchor();
+    m_gsPosLabel->setText(m_bridge->manualGroundStation() || p.available
+        ? QString("%1, %2%3").arg(anchor.latitude(), 0, 'f', 7).arg(anchor.longitude(), 0, 'f', 7)
+            .arg(m_bridge->manualGroundStation() ? "（地图手点）" : p.old ? "（旧值）" : "") : "无可用 GS 坐标");
     QString source = p.source;
     if (source == "RTCM1005") source = "RTCM 1005 基站坐标";
     else if (source == "NMEA_GGA") source = "NMEA GGA";
@@ -411,9 +413,12 @@ void AppWindow::refreshPositionDetails() {
     else if (source == "SVIN_RESULT") source = "自定位结果";
     else if (source == "FIXED_REFERENCE") source = "固定参考坐标";
     else if (source.isEmpty() || source == "UNKNOWN") source = "未知";
-    m_gsSourceLabel->setText(source + " · " + (!p.valid ? "无效 / 已过期" : p.old ? "旧参考" : p.estimated ? "暂估" : "有效"));
+    m_gsSourceLabel->setText((m_bridge->manualGroundStation() ? "地图校正 · 原始参考：" : "自动 · ")
+        + source + " · " + (!p.valid ? "无效 / 已过期" : p.old ? "旧参考" : p.estimated ? "暂估" : "有效"));
     m_gsAgeLabel->setText(p.ageMs >= 0 ? QString("%1 s").arg(p.ageMs / 1000.0, 0, 'f', 2) : "未知");
     const auto &r = m_bridge->relativePosition();
+    m_posLabel->setText(r.valid
+        ? QString("%1 m / %2 m").arg(r.eastM,0,'f',2).arg(r.northM,0,'f',2) : "无有效相对位置");
     m_relativeDistanceLabel->setText(r.valid
         ? QString("%1 m / %2°").arg(r.distanceM, 0, 'f', 2).arg(r.bearingDeg, 0, 'f', 1) : "—");
     m_relativeOffsetLabel->setText(r.valid
@@ -444,11 +449,11 @@ void AppWindow::onTelemetryUpdated(const UsvTelemetry &t) {
     }
 
     m_rtkLabel->setText(m_bridge->rtkStateText());
-    m_posLabel->setText(t.positionValid ? QString("%1, %2").arg(t.latDeg, 0, 'f', 7).arg(t.lonDeg, 0, 'f', 7) : "无有效位置");
+    m_posLabel->setToolTip(t.positionValid ? QString("原始 WGS-84：%1, %2").arg(t.latDeg,0,'f',7).arg(t.lonDeg,0,'f',7) : "无有效船位");
     m_positionSourceLabel->setText(m_bridge->positionSourceText());
     m_diffAgeLabel->setText(t.diffAgeMs >= 0 ? QString("%1 s").arg(t.diffAgeMs / 1000.0, 0, 'f', 2)
         : t.diffAgeState == "STALE" || t.diffAgeState == "EXPIRED" ? "过期" : "未知 / 未提供");
-    m_headingLabel->setText((t.headingValid ? QString("%1°").arg(t.headingDeg, 0, 'f', 1) : "无有效控制方向")
+    m_headingLabel->setText((t.headingValid ? QString("%1°").arg(t.headingDeg, 0, 'f', 1) : "无有效艏向")
         + "\n" + m_bridge->headingSourceText());
     m_headingLabel->setToolTip(t.headingReason);
     m_cogLabel->setText(t.cogValid ? QString("%1°（真北）").arg(t.cogDeg, 0, 'f', 1) : "无有效 COG");
