@@ -147,6 +147,20 @@ private:
         QTRY_VERIFY_WITH_TIMEOUT(client.canControl(), 3000);
     }
 private slots:
+    void identificationRequest_data(){QTest::addColumn<int>("profile");for(int p=1;p<=5;++p)QTest::newRow(qPrintable(QString::number(p)))<<p;}
+    void identificationRequest(){
+        QFETCH(int,profile);Gateway g;g.owner=2;g.work=2;GsClient c;connectClient(c,g);
+        c.submitIdentification(profile,profile==4?0:20,profile==3?90:0,profile==5?3:1,5,10,profile==2||profile==3?10:0,120);
+        QTRY_COMPARE(g.posts.size(),1);const auto r=g.posts.first();
+        QCOMPARE(r.value("kind").toString(),QString("identification"));QCOMPARE(r.value("profile").toInt(),profile);
+        QCOMPARE(r.value("thrust_permille").toInt(),profile==4?0:200);QCOMPARE(r.value("rudder_cdeg").toInt(),profile==3?9000:0);
+        QVERIFY(r.contains("origin_revision"));QVERIFY(g.headersOk);
+    }
+    void identificationRejectsUnsafeShape(){
+        Gateway g;g.owner=2;g.work=2;GsClient c;connectClient(c,g);QSignalSpy result(&c,&GsClient::missionResult);
+        c.submitIdentification(4,10,0,1,5,20,0,120);c.submitIdentification(3,10,30,1,5,20,20,120);
+        c.submitIdentification(5,10,0,5,5,20,0,30);QCOMPARE(g.posts.size(),0);QCOMPARE(result.size(),3);
+    }
     void maneuverRequest_data() {
         QTest::addColumn<bool>("zigzag"); QTest::addColumn<bool>("speed");
         QTest::newRow("turn-thrust") << false << false;

@@ -223,6 +223,11 @@ void AppWindow::setupUi() {
     m_taskSelect->addItem("舵桨直控", "actuator");
     m_taskSelect->addItem("回转实验", "turning");
     m_taskSelect->addItem("Z 型实验", "zigzag");
+    m_taskSelect->addItem("直线定推力实验", "id_1");
+    m_taskSelect->addItem("纵向自由衰减实验", "id_2");
+    m_taskSelect->addItem("横漂自由衰减实验", "id_3");
+    m_taskSelect->addItem("横摇衰减记录（人工扰动）", "id_4");
+    m_taskSelect->addItem("台架阶梯推进（外部测力）", "id_5");
     m_applyModeBtn = new QPushButton("应用所选模式", missionGroup);
     m_modeHint = new QLabel(missionGroup);
     m_modeHint->setWordWrap(true);
@@ -308,8 +313,14 @@ void AppWindow::setupUi() {
     experimentLayout->addWidget(new QLabel("Z 型反舵偏角:"),3,0); experimentLayout->addWidget(m_maneuverThreshold,3,1);
     experimentLayout->addWidget(m_maneuverCountLabel,4,0); experimentLayout->addWidget(m_maneuverCount,4,1);
     experimentLayout->addWidget(new QLabel("最长总时长:"),5,0); experimentLayout->addWidget(m_maneuverSeconds,5,1);
-    auto *experimentHint = new QLabel("先预备直航5秒，再执行实验。需新鲜定位和直接磁艏向；定速另需有效航速。完整原始记录保存在船端工控机。",m_maneuverGroup);
-    experimentHint->setWordWrap(true); experimentLayout->addWidget(experimentHint,6,0,1,2);
+    m_settleSeconds=new QSpinBox(m_maneuverGroup);m_settleSeconds->setRange(1,60);m_settleSeconds->setValue(5);m_settleSeconds->setSuffix(" s");
+    m_holdSeconds=new QSpinBox(m_maneuverGroup);m_holdSeconds->setRange(1,300);m_holdSeconds->setValue(20);m_holdSeconds->setSuffix(" s / 档");
+    m_coastSeconds=new QSpinBox(m_maneuverGroup);m_coastSeconds->setRange(0,300);m_coastSeconds->setValue(20);m_coastSeconds->setSuffix(" s");
+    experimentLayout->addWidget(new QLabel("准备时间:"),6,0);experimentLayout->addWidget(m_settleSeconds,6,1);
+    experimentLayout->addWidget(new QLabel("保持 / 记录时间:"),7,0);experimentLayout->addWidget(m_holdSeconds,7,1);
+    experimentLayout->addWidget(new QLabel("断推滑行时间:"),8,0);experimentLayout->addWidget(m_coastSeconds,8,1);
+    auto *experimentHint = new QLabel("回转/Z型先准备5秒；直线/衰减使用下方时长。横漂须确认机构可到±90°；横摇仅记录、人工扰动；台架须先固定并配外部测力。原始记录保存在IPC，停止按钮随时取消。",m_maneuverGroup);
+    experimentHint->setWordWrap(true); experimentLayout->addWidget(experimentHint,9,0,1,2);
     missionLayout->addWidget(m_maneuverGroup,14,0,1,2); m_maneuverGroup->hide();
     connect(m_maneuverDriveMode,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int){
         const bool speed=m_maneuverDriveMode->currentData().toInt()==1;
@@ -318,9 +329,12 @@ void AppWindow::setupUi() {
     });
     connect(m_taskSelect,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this](int){
         const QString kind=m_taskSelect->currentData().toString(); const bool zig=kind=="zigzag";
-        if(kind=="turning"||zig)m_ownerSelect->setCurrentIndex(m_ownerSelect->findData(2));
-        m_maneuverCount->setRange(zig?1:4,16); m_maneuverCount->setValue(zig?4:6);
-        m_maneuverCount->setSuffix(zig?" 次":" ×90°"); m_maneuverCountLabel->setText(zig?"反舵次数:":"回转总角度:");
+        const bool identification=kind.startsWith("id_");const int profile=identification?kind.mid(3).toInt():0;
+        if(kind=="turning"||zig||identification)m_ownerSelect->setCurrentIndex(m_ownerSelect->findData(2));
+        m_maneuverCount->setRange(identification||zig?1:4,16);m_maneuverCount->setValue(identification?(profile==5?5:1):zig?4:6);
+        m_maneuverCount->setSuffix(identification?" 档":zig?" 次":" ×90°");m_maneuverCountLabel->setText(identification?"推进档位数:":zig?"反舵次数:":"回转总角度:");
+        m_maneuverRudder->setRange(profile==3?-90:-30,profile==3?90:30);m_maneuverRudder->setValue(profile==3?90:identification?0:10);
+        if(identification){m_maneuverDriveMode->setCurrentIndex(0);m_maneuverDrive->setValue(profile==4?0:10);m_maneuverSeconds->setValue(profile==5?180:120);}
         refreshControls();
     });
     panelLayout->addWidget(missionGroup);
@@ -471,9 +485,14 @@ void AppWindow::refreshControls() {
     const bool busy = m_client->isBusy();
     const int owner = m_ownerSelect->currentData().toInt(), work = selectedWork();
     const QString kind = m_taskSelect->currentData().toString();
-    const bool experiment=kind=="turning"||kind=="zigzag";
+    const bool identification=kind.startsWith("id_");const int profile=identification?kind.mid(3).toInt():0;
+    const bool experiment=kind=="turning"||kind=="zigzag"||identification;
     m_maneuverGroup->setVisible(experiment); m_maneuverGroup->setEnabled(!busy);
     m_maneuverThreshold->setEnabled(kind=="zigzag");
+    m_maneuverDriveMode->setEnabled(!identification);m_maneuverDrive->setEnabled(profile!=4);
+    m_maneuverRudder->setEnabled(!identification||profile==3);m_maneuverCount->setEnabled(!identification||profile==5);
+    m_settleSeconds->setEnabled(identification);m_holdSeconds->setEnabled(identification);
+    m_coastSeconds->setEnabled(profile==2||profile==3);
     const bool selected = m_client->canPublish(owner, work);
     m_targetSelect->setEnabled(!busy);
     m_ownerSelect->setEnabled(!busy&&!experiment);
@@ -507,6 +526,12 @@ void AppWindow::onGcj02Toggled(bool checked) {
 void AppWindow::onPublishWaypointsClicked() {
     const int owner = m_ownerSelect->currentData().toInt();
     const QString kind = m_taskSelect->currentData().toString();
+    if(kind.startsWith("id_")){
+        const int profile=kind.mid(3).toInt();
+        m_client->submitIdentification(profile,profile==4?0:m_maneuverDrive->value(),profile==3?m_maneuverRudder->value():0,
+            profile==5?m_maneuverCount->value():1,m_settleSeconds->value(),m_holdSeconds->value(),
+            profile==2||profile==3?m_coastSeconds->value():0,m_maneuverSeconds->value());return;
+    }
     if(kind=="turning"||kind=="zigzag"){
         m_client->submitManeuver(kind=="zigzag",m_maneuverRudder->value(),m_maneuverDriveMode->currentData().toInt()==1,
             m_maneuverDrive->value(),kind=="zigzag"?m_maneuverThreshold->value():0,m_maneuverCount->value(),m_maneuverSeconds->value());

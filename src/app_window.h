@@ -92,6 +92,7 @@ private:
     QDoubleSpinBox *m_maneuverDrive;
     QSpinBox *m_maneuverCount;
     QSpinBox *m_maneuverSeconds;
+    QSpinBox *m_settleSeconds,*m_holdSeconds,*m_coastSeconds;
     QLabel *m_maneuverCountLabel;
     QLabel *m_executionLabel;
     QPushButton *m_publishBtn;

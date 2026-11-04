@@ -452,6 +452,32 @@ void GsClient::submitManeuver(bool zigzag, double rudderDeg, bool speedMode, dou
     beginOperation(req);
 }
 
+void GsClient::submitIdentification(int profile,double thrustPercent,double rudderDeg,int count,
+                                   int settleSeconds,int holdSeconds,int coastSeconds,int maxSeconds) {
+    if(profile<1||profile>5||!std::isfinite(thrustPercent)||thrustPercent<0||thrustPercent>100||
+       !std::isfinite(rudderDeg)||count<1||count>16||(profile!=5&&count!=1)||settleSeconds<1||settleSeconds>60||
+       holdSeconds<1||holdSeconds>300||coastSeconds<0||coastSeconds>300||maxSeconds<10||maxSeconds>600||
+       settleSeconds+holdSeconds*count+coastSeconds+5>maxSeconds||
+       (profile==3?std::abs(rudderDeg)!=90:rudderDeg!=0)||
+       (profile==4?thrustPercent!=0:thrustPercent<=0)||
+       ((profile==2||profile==3)?coastSeconds<=0:coastSeconds!=0)) {
+        emit missionResult(false,"实验参数无效：总时限须覆盖准备、各档保持、滑行及5秒握手余量；横漂只允许±90°，横摇推进必须为0。");return;
+    }
+    if(m_latestTelemetry.taskFresh&&(m_latestTelemetry.taskPhase=="RUNNING"||m_latestTelemetry.taskPhase=="STARTING"||m_latestTelemetry.taskPhase=="STOPPING")){
+        emit missionResult(false,"请先停船并确认输出关闭，再发布实验");return;
+    }
+    auto req=taskRequest("identification",2,2);if(req.isEmpty())return;
+    const bool origin=m_groundPosition.valid;
+    const qint32 lat=origin?qint32(std::llround(m_groundPosition.latDeg*1e7)):0;
+    const qint32 lon=origin?qint32(std::llround(m_groundPosition.lonDeg*1e7)):0;
+    const quint32 revision=origin?qMax(1u,qHash(QString::number(lat)+","+QString::number(lon),0)):0;
+    req.insert("profile",profile);req.insert("count",count);req.insert("settle_seconds",settleSeconds);
+    req.insert("hold_seconds",holdSeconds);req.insert("coast_seconds",coastSeconds);req.insert("max_seconds",maxSeconds);
+    req.insert("rudder_cdeg",int(std::lround(rudderDeg*100)));req.insert("thrust_permille",int(std::lround(thrustPercent*10)));
+    req.insert("origin_valid",origin?1:0);req.insert("origin_latitude_e7",lat);req.insert("origin_longitude_e7",lon);
+    req.insert("origin_revision",double(revision));beginOperation(req);
+}
+
 void GsClient::submitEmergencyStop() {
     // STOP preempts local submission/mode tracking and does not require a fresh mode.
     if (!canControl(false)) { emit missionResult(false, "无法发送停船：等待目标船LoRa身份和网关认证"); return; }
@@ -627,7 +653,7 @@ void GsClient::evaluateOperation() {
             if (kind != "stop" && reason == "ROUTE_COMPLETE" && stopped && state != "STOPPING") {
                 finishOperation(true, "航路点已完成，输出已关闭"); return;
             }
-            if ((kind == "turning" || kind == "zigzag") && stopped && state != "STOPPING" &&
+            if ((kind == "turning" || kind == "zigzag" || kind == "identification") && stopped && state != "STOPPING" &&
                 (reason == "EXPERIMENT_COMPLETE" || reason == "EXPERIMENT_ABORTED")) {
                 finishOperation(reason == "EXPERIMENT_COMPLETE", executionReasonText(reason) + "；船端已确认输出关闭"); return;
             }

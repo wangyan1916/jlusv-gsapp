@@ -69,6 +69,8 @@ public:
     void submitHeadingOnly(int owner, double headingDeg, double throttlePercent);
     void submitManeuver(bool zigzag, double rudderDeg, bool speedMode, double drive,
                         double thresholdDeg, int count, int maxSeconds);
+    void submitIdentification(int profile,double thrustPercent,double rudderDeg,int count,
+                              int settleSeconds,int holdSeconds,int coastSeconds,int maxSeconds);
     void submitEmergencyStop();
     void queryOperation();
 
