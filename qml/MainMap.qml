@@ -61,6 +61,7 @@ Item {
 
     Map {
         id: map
+        objectName: "navigationMap"
         anchors.fill: parent
         plugin: mapPlugin
         transformOrigin: Item.Center
@@ -118,6 +119,7 @@ Item {
 
         MapQuickItem {
             id: groundStationMarker
+            objectName: "groundStationMarker"
             coordinate: QtPositioning.coordinate(mapBridge.groundStationLat, mapBridge.groundStationLon)
             anchorPoint.x: 18
             anchorPoint.y: 18
@@ -154,6 +156,7 @@ Item {
         // 船只实时位置与航向图标
         MapQuickItem {
             id: boatMarker
+            objectName: "boatMarker"
             coordinate: QtPositioning.coordinate(mapBridge.boatLat, mapBridge.boatLon)
             anchorPoint.x: 18
             anchorPoint.y: 18
@@ -162,9 +165,13 @@ Item {
             sourceItem: Item {
                 width: 36
                 height: 36
-                rotation: mapBridge.boatHeadingValid ? mapBridge.boatHeading : 0
 
                 Canvas {
+                    objectName: "boatSymbol"
+                    // MapQuickItem sets its source item's origin to TopLeft.
+                    // Rotate this child so the position anchor stays at the centre.
+                    transformOrigin: Item.Center
+                    rotation: mapBridge.boatHeadingValid ? mapBridge.boatHeading : 0
                     property bool directionValid: mapBridge.boatHeadingValid
                     onDirectionValidChanged: requestPaint()
                     anchors.fill: parent

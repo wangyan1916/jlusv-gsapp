@@ -1,6 +1,9 @@
-# JLUSV 地面站上位机 1.2.0 (Qt 5.15.3 C++17)
+# JLUSV 地面站上位机 1.2.1 (Qt 5.15.3 C++17)
 
 本子项目是专为无人船 (USV) 打造的桌面端地面站程序，使用支持 C++17 的 Qt 5.15.3 开发。
+
+1.2.1修复船形旋转引起的地图位置偏移：位置锚点固定在图标中心，艏向只旋转内部船形。东/北均为负时船形中心位于蓝色GS标记西南侧；手点GS、底图转换和相对米数规则保持。本地实际QML检查覆盖四象限、重合、不同艏向和缩放；现场效果尚待复测。
+已有1.2.0完整运行目录时，可关闭程序后用1.2.1更新包中的 `jlusv_gsapp.exe` 替换原EXE，保留Qt、QML插件与地图文件。
 
 1.1.5主船位显示相对GS的东/北米数。地图“地图手点GS”仅校正显示原点，船位和航点同步平移；相对米数仍按原始接收机参考计算，地图新增航点逆变换后按WGS-84下发。“GS恢复自动”撤销校正，手动原点只用于当前连接，不写接收机参数。参考过期时暂停相对显示和手动模式地图加点。
 船头图标与艏向数值固定使用直接磁艏向，航迹向COG独立显示；旧固件只上报COG控制方向时显示艏向未独立上报。配套USV RP207/GS ESP102，控制选源策略与USB v2保持。
@@ -69,4 +72,4 @@ ctest --test-dir build -C Release --output-on-failure
 唯一交付入口为本库已有的 `build/Release/jlusv_gsapp.exe`，Qt/QML/MSVC依赖保持在同目录。
 直接双击EXE即可，地图服务按EXE位置找到本库 `maps/tiles`（相对Release目录的 `../../maps/tiles`），不依赖启动工作目录或额外脚本，不复制地图资产。
 
-复制到另一台Windows x64电脑时，执行 `python tools/package_portable.py`，使用生成的 `build/portable-dist/JLUSV-GSApp-1.2.0-Windows-x64-portable.zip`。完整解压后双击其中EXE；不要只复制EXE。便携包包含Qt/QML/地图插件、MSVC运行库、相对路径qt.conf及现有离线瓦片，地图覆盖范围与原机相同；无需安装开发环境，仍需正常显卡驱动。包内不带控制密码或设备会话。
+复制到另一台Windows x64电脑时，执行 `python tools/package_portable.py`，使用生成的 `build/portable-dist/JLUSV-GSApp-1.2.1-Windows-x64-portable.zip`。完整解压后双击其中EXE；不要只复制EXE。便携包包含Qt/QML/地图插件、MSVC运行库、相对路径qt.conf及现有离线瓦片，地图覆盖范围与原机相同；无需安装开发环境，仍需正常显卡驱动。包内不带控制密码或设备会话。

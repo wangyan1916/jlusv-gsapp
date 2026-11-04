@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(jlusv_gsapp VERSION 1.2.0 LANGUAGES CXX)
+project(jlusv_gsapp VERSION 1.2.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -87,4 +87,10 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME gs_client_local_gateway COMMAND test_gs_client -o "${CMAKE_CURRENT_BINARY_DIR}/gs-client-tests.txt,txt")
     set_tests_properties(gs_client_local_gateway PROPERTIES TIMEOUT 90)
+    add_test(NAME gs_map_marker_positions
+        COMMAND "$<TARGET_FILE_DIR:Qt5::Core>/qmltestrunner${CMAKE_EXECUTABLE_SUFFIX}"
+            -input "${CMAKE_CURRENT_SOURCE_DIR}/tests/tst_map_markers.qml"
+            -o "${CMAKE_CURRENT_BINARY_DIR}/map-marker-tests.txt,txt")
+    set_tests_properties(gs_map_marker_positions PROPERTIES TIMEOUT 30
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software;QT_FORCE_STDERR_LOGGING=1")
 endif()
